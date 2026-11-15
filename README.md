@@ -16,7 +16,7 @@ Su Windows, se l'installazione di insightface fallisce durante la compilazione, 
 ## Installazione
 
 ```bash
-git clone <url-del-repository> SecondLook
+git clone https://github.com/NicoPozio/SecondLook.git
 cd SecondLook
 uv sync
 ```
