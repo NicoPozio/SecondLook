@@ -1,0 +1,405 @@
+<!doctype html>
+<!--
+  Test di precisione dei timestamp (Fase 0 della pipeline)
+
+  Scopo: capire se il browser che useremo per la raccolta dati misura il tempo
+  dei tasti (keydown / keyup) con una precisione sufficiente per il keystroke.
+
+  Cosa misura:
+    1. la risoluzione del timer del browser (performance.now)
+    2. la risoluzione dei timestamp degli eventi da tastiera (event.timeStamp)
+    3. il ritardo tra la nascita dell'evento e l'esecuzione del nostro codice
+    4. hold time e latenze sulla frase digitata, come li calcolera' il progetto
+
+  Come si lancia (dalla cartella SecondLook):
+      uv run python -m http.server 8000 --directory tools
+  poi si apre nel browser: http://localhost:8000/timestamp_test.html
+
+  Nessun dato lascia il computer: tutto e' calcolato nella pagina; il pulsante
+  "Esporta JSON" salva un file nella cartella Download.
+-->
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test precisione timestamp</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6b66;
+    --line: #dddad3; --ok: #1f7a3d; --warn: #9a6200; --bad: #b3261e; --accent: #2457a6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  p { margin: 6px 0; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px; margin: 14px 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  button { font: inherit; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--accent);
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text] { font: 16px/1.4 ui-monospace, Consolas, monospace; width: 100%;
+                     padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+  #typing { border-color: var(--accent); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 14px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  .scroll { overflow-x: auto; }
+  .verdict { font-weight: 600; padding: 10px 12px; border-radius: 8px; }
+  .verdict.ok { background: #e6f3ea; color: var(--ok); }
+  .verdict.warn { background: #fbf0dc; color: var(--warn); }
+  .verdict.bad { background: #f9e3e1; color: var(--bad); }
+  .muted { color: var(--muted); font-size: 13px; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Test di precisione dei timestamp</h1>
+  <p class="sub">Fase 0 della pipeline: il browser misura il tempo dei tasti con abbastanza precisione per il keystroke?</p>
+
+  <section class="card">
+    <h2>Ambiente</h2>
+    <div class="grid" id="env"></div>
+  </section>
+
+  <section class="card">
+    <h2>1. Risoluzione del timer</h2>
+    <p>Chiama <code>performance.now()</code> in un ciclo per mezzo secondo e guarda di quanto avanza ogni volta che cambia valore: il passo più frequente è la risoluzione del timer.</p>
+    <div class="row"><button id="btnTimer">Misura il timer</button></div>
+    <div class="grid" id="timerOut" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>2. Digita la frase</h2>
+    <p>Frase da digitare (si può cambiare):</p>
+    <input type="text" id="phrase" value="la biometria misura come scriviamo" autocomplete="off" spellcheck="false">
+    <p style="margin-top:12px">Scrivila qui sotto con il tuo ritmo naturale e premi <b>Invio</b> alla fine. Ripeti almeno 5 volte.</p>
+    <input type="text" id="typing" autocomplete="off" spellcheck="false" placeholder="scrivi qui...">
+    <div class="row">
+      <span class="muted" id="repCount">Ripetizioni valide: 0</span>
+      <button class="secondary" id="btnReset">Azzera tutto</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. Risultati</h2>
+    <div id="verdict"></div>
+    <div class="grid" id="eventOut" style="margin-top:10px"></div>
+    <h2 style="margin-top:16px">Ultima ripetizione: tempi per tasto</h2>
+    <p class="muted">Hold = quanto resta premuto il tasto (keyup − keydown). Flight = dal rilascio del tasto alla pressione del successivo (può essere negativo se si preme il tasto dopo prima di rilasciare il precedente).</p>
+    <div class="scroll"><table id="keyTable"><thead><tr><th>Tasto</th><th>Hold (ms)</th><th>Flight (ms)</th></tr></thead><tbody></tbody></table></div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnExport" disabled>Esporta JSON</button>
+      <span class="muted">Salva tutti gli eventi e le misure, per confrontare browser diversi.</span>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Stato della pagina
+// ---------------------------------------------------------------------------
+const state = {
+  timer: null,          // risultato della misura del timer (sezione 1)
+  current: [],          // eventi della ripetizione in corso
+  repetitions: [],      // ripetizioni concluse con Invio
+};
+
+const $ = (id) => document.getElementById(id);
+const fmt = (x, d = 3) => (x === null || x === undefined || Number.isNaN(x)) ? "–" : Number(x).toFixed(d);
+
+// ---------------------------------------------------------------------------
+// Ambiente: quale browser, e se la pagina e' "cross-origin isolated"
+// (i browser danno un timer piu' preciso solo alle pagine isolate)
+// ---------------------------------------------------------------------------
+function browserName(ua) {
+  if (/Edg\//.test(ua)) return "Edge";
+  if (/OPR\//.test(ua)) return "Opera";
+  if (/Firefox\//.test(ua)) return "Firefox";
+  if (/Chrome\//.test(ua)) return "Chrome";
+  if (/Safari\//.test(ua)) return "Safari";
+  return "sconosciuto";
+}
+
+function renderEnv() {
+  const ua = navigator.userAgent;
+  const items = [
+    ["Browser", browserName(ua)],
+    ["Indirizzo", location.protocol === "file:" ? "file:// (aperto con doppio clic)" : location.origin],
+    ["Cross-origin isolated", String(window.crossOriginIsolated === true)],
+  ];
+  $("env").innerHTML = items.map(([k, v]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v" style="font-size:15px">${v}</div></div>`).join("");
+}
+
+// ---------------------------------------------------------------------------
+// 1. Risoluzione del timer
+// Si chiama performance.now() di continuo. Ogni volta che il valore cambia si
+// annota di quanto e' avanzato. Se il timer avesse precisione infinita i salti
+// sarebbero minuscoli e tutti diversi; se e' arrotondato, i salti sono quasi
+// sempre uguali al passo di arrotondamento. Il passo piu' frequente (la moda)
+// e' quindi la stima della risoluzione.
+// ---------------------------------------------------------------------------
+function measureTimer(durationMs = 500) {
+  const counts = new Map();
+  let last = performance.now();
+  const end = last + durationMs;
+  let changes = 0;
+  for (;;) {
+    const t = performance.now();
+    if (t !== last) {
+      const step = Math.round((t - last) * 1e6) / 1e6;   // arrotonda a 1 ns per raggruppare
+      counts.set(step, (counts.get(step) || 0) + 1);
+      changes++;
+      last = t;
+      if (t >= end) break;
+    }
+  }
+  const steps = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const mode = steps[0][0];
+  const minStep = Math.min(...counts.keys());
+  return { durationMs, changes, modeStepMs: mode, minStepMs: minStep,
+           topSteps: steps.slice(0, 5).map(([s, n]) => ({ stepMs: s, count: n })) };
+}
+
+function renderTimer() {
+  const t = state.timer;
+  if (!t) { $("timerOut").innerHTML = ""; return; }
+  const items = [
+    ["Passo più frequente", fmt(t.modeStepMs, 4) + " ms"],
+    ["Passo più piccolo", fmt(t.minStepMs, 4) + " ms"],
+    ["Cambi di valore in " + t.durationMs + " ms", t.changes.toLocaleString("it-IT")],
+  ];
+  $("timerOut").innerHTML = items.map(([k, v]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+}
+
+// ---------------------------------------------------------------------------
+// 2. Registrazione degli eventi da tastiera
+// Per ogni keydown/keyup si salvano:
+//   ts   = event.timeStamp: il momento in cui il browser ha creato l'evento
+//   now  = performance.now() quando il nostro codice parte (un po' dopo)
+//   repeat = true se l'evento e' una ripetizione automatica (tasto tenuto giu')
+// event.timeStamp e performance.now() usano lo stesso orologio, quindi
+// now - ts e' il ritardo con cui il nostro codice vede l'evento.
+// ---------------------------------------------------------------------------
+function record(e) {
+  const now = performance.now();
+  if (e.type === "keydown" && e.key === "Enter") {
+    finishRepetition();
+    e.preventDefault();
+    return;
+  }
+  state.current.push({ type: e.type, key: e.key, code: e.code, ts: e.timeStamp, now, repeat: e.repeat });
+}
+
+function finishRepetition() {
+  const events = state.current;
+  state.current = [];
+  const typed = $("typing").value;
+  $("typing").value = "";
+  if (events.length === 0) return;
+  const target = $("phrase").value;
+  const corrected = events.some(ev => ev.type === "keydown" && ev.key === "Backspace");
+  state.repetitions.push({ target, typed, matches: typed === target, corrected, events });
+  renderResults();
+}
+
+// ---------------------------------------------------------------------------
+// Feature del keystroke, calcolate come le calcolera' il progetto:
+//   hold   = keyup - keydown dello stesso tasto
+//   flight = keydown del tasto k+1 - keyup del tasto k
+// Le ripetizioni automatiche (repeat) si scartano. L'abbinamento keydown/keyup
+// si fa per "code" (il tasto fisico), perche' due tasti possono essere premuti
+// insieme e i loro keyup arrivare in ordine diverso.
+// ---------------------------------------------------------------------------
+function keystrokeFeatures(events) {
+  const open = new Map();     // code -> indice del tasto premuto e non ancora rilasciato
+  const keys = [];            // {key, down, up}
+  for (const ev of events) {
+    if (ev.repeat) continue;
+    if (ev.type === "keydown") {
+      open.set(ev.code, keys.length);
+      keys.push({ key: ev.key, code: ev.code, down: ev.ts, up: null });
+    } else if (ev.type === "keyup" && open.has(ev.code)) {
+      keys[open.get(ev.code)].up = ev.ts;
+      open.delete(ev.code);
+    }
+  }
+  const unmatched = keys.filter(k => k.up === null).length;
+  const rows = keys.map((k, i) => ({
+    key: k.key,
+    hold: k.up === null ? null : k.up - k.down,
+    flight: (i + 1 < keys.length && k.up !== null) ? keys[i + 1].down - k.up : null,
+  }));
+  return { rows, unmatched };
+}
+
+// ---------------------------------------------------------------------------
+// Risoluzione dei timestamp degli eventi
+// Si prova una lista di passi possibili (da 5 microsecondi a 100 ms). Per ogni
+// passo q si controlla se tutti i timestamp sono multipli di q. Il passo piu'
+// grande per cui questo vale (per almeno il 99% dei timestamp) e' la
+// granularita' con cui il browser ci da' il tempo degli eventi.
+// ---------------------------------------------------------------------------
+const CANDIDATE_STEPS = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 4, 5, 8, 10, 1000 / 60, 20, 50, 100];
+
+function isMultiple(t, q) {
+  const r = t / q;
+  return Math.abs(r - Math.round(r)) < 1e-3;
+}
+
+function eventGranularity(timestamps) {
+  if (timestamps.length < 10) return null;
+  let best = null;
+  for (const q of CANDIDATE_STEPS) {
+    const share = timestamps.filter(t => isMultiple(t, q)).length / timestamps.length;
+    if (share >= 0.99) best = q;
+  }
+  return best;   // null = piu' fine di 5 microsecondi
+}
+
+function median(xs) {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function std(xs) {
+  if (xs.length < 2) return null;
+  const mu = xs.reduce((a, b) => a + b, 0) / xs.length;
+  return Math.sqrt(xs.reduce((a, b) => a + (b - mu) ** 2, 0) / (xs.length - 1));
+}
+
+// ---------------------------------------------------------------------------
+// Verdetto. La regola si basa sull'errore di quantizzazione: se il tempo e'
+// arrotondato a un passo r, l'errore e' uniforme in [-r/2, r/2] e ha deviazione
+// standard r / sqrt(12). Lo si confronta con la variabilita' naturale di una
+// persona (deviazione standard dei suoi hold time, misurata qui sotto).
+//   r <= 1 ms           -> ok: errore <= 0.3 ms, trascurabile
+//   1 ms < r <= 5 ms    -> accettabile: errore <= 1.5 ms
+//   r > 5 ms            -> non adatto: l'errore diventa paragonabile alle
+//                          differenze tra persone
+// Le soglie sono una regola pratica, non uno standard.
+// ---------------------------------------------------------------------------
+function verdictFor(r) {
+  if (r === null) return { cls: "warn", text: "Digita almeno 5 ripetizioni per avere un verdetto." };
+  const err = r / Math.sqrt(12);
+  if (r <= 1) return { cls: "ok", text: `OK: risoluzione ${fmt(r, 3)} ms, errore tipico ${fmt(err, 2)} ms. Il browser va bene per il keystroke.` };
+  if (r <= 5) return { cls: "warn", text: `Accettabile: risoluzione ${fmt(r, 3)} ms, errore tipico ${fmt(err, 2)} ms. Utilizzabile, ma conviene provare un altro browser.` };
+  return { cls: "bad", text: `Non adatto: risoluzione ${fmt(r, 3)} ms, errore tipico ${fmt(err, 2)} ms. Cambiare browser o disattivare le protezioni anti-fingerprinting.` };
+}
+
+function analyze() {
+  const valid = state.repetitions.filter(r => r.matches && !r.corrected);
+  const allEvents = state.repetitions.flatMap(r => r.events).filter(e => !e.repeat);
+  const timestamps = allEvents.map(e => e.ts);
+  const granularity = eventGranularity(timestamps);
+  const delays = allEvents.map(e => e.now - e.ts);
+  const holds = valid.flatMap(r => keystrokeFeatures(r.events).rows.map(x => x.hold)).filter(x => x !== null);
+  const flights = valid.flatMap(r => keystrokeFeatures(r.events).rows.map(x => x.flight)).filter(x => x !== null);
+  // risoluzione efficace: la peggiore tra timer ed eventi
+  const timerStep = state.timer ? state.timer.modeStepMs : null;
+  const parts = [granularity ?? 0.005, timerStep ?? 0].filter(x => x !== null);
+  const effective = valid.length >= 5 ? Math.max(...parts) : null;
+  return {
+    validRepetitions: valid.length,
+    totalRepetitions: state.repetitions.length,
+    eventCount: allEvents.length,
+    eventGranularityMs: granularity,
+    effectiveResolutionMs: effective,
+    dispatchDelayMedianMs: median(delays),
+    dispatchDelayMaxMs: delays.length ? Math.max(...delays) : null,
+    holdMedianMs: median(holds), holdStdMs: std(holds),
+    flightMedianMs: median(flights), flightStdMs: std(flights),
+    unmatchedKeydowns: state.repetitions.reduce((n, r) => n + keystrokeFeatures(r.events).unmatched, 0),
+  };
+}
+
+function renderResults() {
+  const a = analyze();
+  $("repCount").textContent = `Ripetizioni valide: ${a.validRepetitions} su ${a.totalRepetitions}` +
+    (a.totalRepetitions > a.validRepetitions ? " (scartate quelle diverse dalla frase o con Backspace)" : "");
+  const v = verdictFor(a.effectiveResolutionMs);
+  $("verdict").innerHTML = `<div class="verdict ${v.cls}">${v.text}</div>`;
+  const g = a.eventGranularityMs === null ? (a.eventCount >= 10 ? "< 0.005 ms" : "–") : fmt(a.eventGranularityMs, 3) + " ms";
+  const items = [
+    ["Passo dei timestamp degli eventi", g],
+    ["Ritardo evento → codice (mediana)", fmt(a.dispatchDelayMedianMs, 2) + " ms"],
+    ["Ritardo evento → codice (massimo)", fmt(a.dispatchDelayMaxMs, 2) + " ms"],
+    ["Hold time: mediana / dev. std", fmt(a.holdMedianMs, 1) + " / " + fmt(a.holdStdMs, 1) + " ms"],
+    ["Flight time: mediana / dev. std", fmt(a.flightMedianMs, 1) + " / " + fmt(a.flightStdMs, 1) + " ms"],
+    ["Tasti senza keyup", String(a.unmatchedKeydowns)],
+  ];
+  $("eventOut").innerHTML = items.map(([k, val]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v">${val}</div></div>`).join("");
+
+  const last = state.repetitions[state.repetitions.length - 1];
+  const tbody = $("keyTable").querySelector("tbody");
+  tbody.innerHTML = last ? keystrokeFeatures(last.events).rows.map(r =>
+    `<tr><td>${r.key === " " ? "␣ (spazio)" : r.key}</td><td>${fmt(r.hold, 2)}</td><td>${fmt(r.flight, 2)}</td></tr>`).join("") : "";
+  $("btnExport").disabled = state.repetitions.length === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Export: un file JSON con ambiente, misure e tutti gli eventi grezzi
+// ---------------------------------------------------------------------------
+function exportJson() {
+  const payload = {
+    createdAt: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    browser: browserName(navigator.userAgent),
+    origin: location.protocol === "file:" ? "file://" : location.origin,
+    crossOriginIsolated: window.crossOriginIsolated === true,
+    timer: state.timer,
+    summary: analyze(),
+    repetitions: state.repetitions,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  const day = payload.createdAt.slice(0, 10);
+  a.href = URL.createObjectURL(blob);
+  a.download = `timestamp_test_${payload.browser.toLowerCase()}_${day}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Collegamento dei pulsanti
+// ---------------------------------------------------------------------------
+$("typing").addEventListener("keydown", record);
+$("typing").addEventListener("keyup", record);
+$("btnTimer").addEventListener("click", () => {
+  $("btnTimer").disabled = true;
+  setTimeout(() => {           // lascia aggiornare la pagina prima del ciclo
+    state.timer = measureTimer();
+    renderTimer();
+    renderResults();
+    $("btnTimer").disabled = false;
+  }, 20);
+});
+$("btnReset").addEventListener("click", () => {
+  state.current = []; state.repetitions = []; $("typing").value = ""; renderResults();
+});
+$("btnExport").addEventListener("click", exportJson);
+
+renderEnv();
+renderResults();
+</script>
+</body>
+</html>
