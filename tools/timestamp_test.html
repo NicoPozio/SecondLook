@@ -197,8 +197,10 @@ function renderTimer() {
 // ---------------------------------------------------------------------------
 function record(e) {
   const now = performance.now();
-  if (e.type === "keydown" && e.key === "Enter") {
-    finishRepetition();
+  if (e.key === "Enter") {
+    // Invio chiude la ripetizione. Il suo keyup arriva dopo, quando la nuova
+    // ripetizione e' gia' iniziata: lo si scarta per non sporcarla.
+    if (e.type === "keydown") finishRepetition();
     e.preventDefault();
     return;
   }
