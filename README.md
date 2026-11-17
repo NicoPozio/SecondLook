@@ -41,6 +41,29 @@ uv run python scripts/compare_faces.py data/foto_a.jpg data/foto_b.jpg
 
 Lo script stampa la distanza coseno tra i due volti (0 significa identici) e la confidenza del detector. Se in una foto ci sono più persone, viene usato il volto più grande. Indicativamente, la stessa persona resta sotto 0.6 e persone diverse superano 0.8; la soglia definitiva sarà fissata dalla valutazione su LFW.
 
+## Test di precisione dei timestamp
+
+Il keystroke misura per quanto resta premuto ogni tasto e quanto passa tra un tasto e il successivo, cioè differenze di pochi millisecondi. I browser però arrotondano di proposito i tempi degli eventi, per motivi di sicurezza, e di quanto lo fanno dipende dal browser e dalle sue impostazioni. Prima di costruire l'app di acquisizione va quindi verificato che il browser scelto sia abbastanza preciso.
+
+La pagina `tools/timestamp_test.html` fa questa verifica. Si avvia con:
+
+```bash
+uv run python -m http.server 8000 --directory tools
+```
+
+e si apre nel browser da provare all'indirizzo `http://localhost:8000/timestamp_test.html`. Il server serve perché la pagina giri nelle stesse condizioni dell'app, che sarà anch'essa servita da un server. Nella pagina:
+
+1. **Misura il timer**: stima il passo dell'orologio del browser (`performance.now()`).
+2. Si digita la frase almeno 5 volte, premendo Invio dopo ognuna: la pagina registra `keydown` e `keyup`, stima il passo dei timestamp degli eventi (`event.timeStamp`) e calcola hold e flight time.
+3. Si legge il verdetto: passo fino a 1 ms OK, fino a 5 ms accettabile, oltre non adatto. Le soglie sono una regola pratica basata sull'errore di arrotondamento (passo / √12) confrontato con la variabilità naturale di chi digita.
+4. **Esporta JSON** salva misure ed eventi grezzi nella cartella Download.
+
+Tutto è calcolato nel browser e nessun dato lascia il computer. I JSON esportati contengono il ritmo di digitazione di una persona, quindi **non vanno messi nel repository**: se servono vicino al progetto, vanno in `data/`, che è esclusa da git.
+
+Primi risultati (17 novembre 2026, Windows): **Chrome 157** ed **Edge 157** hanno entrambi un passo di 0.1 ms sia per l'orologio sia per gli eventi, con un errore tipico di arrotondamento di circa 0.03 ms. Sono quindi equivalenti per il keystroke (Edge usa lo stesso motore di Chrome). Firefox non è stato ancora provato. Qualunque browser si scelga, va usato con la stessa versione per tutte le sessioni di raccolta, e il test va ripetuto sul computer usato per la raccolta.
+
+Gli eventi vanno sempre letti con `event.timeStamp`, l'istante in cui il browser ha creato l'evento, e non con `performance.now()` dentro il gestore: il ritardo con cui il codice riceve un evento varia e può arrivare a 20-30 ms.
+
 ## Struttura
 
 ```
@@ -49,7 +72,13 @@ SecondLook/
   uv.lock               versioni esatte delle dipendenze
   src/secondlook/
     face/embed.py       rilevamento, allineamento ed embedding ArcFace
+    reliability/        stimatori di affidabilità: SRR, margine, Weibull (da fare)
+    keystroke/          feature di digitazione e matcher (da fare)
+    fusion/             normalizzazione, step-up, aggiornamento template (da fare)
+    eval/               dataset, matrici delle distanze, metriche (da fare)
+    app/                app web di acquisizione e demo (da fare)
   scripts/              script da riga di comando
+  tools/                strumenti di supporto, es. il test dei timestamp
   tests/                test con pytest
   data/                 dati locali, esclusi da git
 ```
