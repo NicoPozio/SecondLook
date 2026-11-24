@@ -23,7 +23,8 @@ COSA C'E' IN QUESTO FILE
     embed_rows              calcola gli embedding che mancano nella cache
 
 MAPPA DELLE CHIAMATE
-    embed_rows -> EmbeddingCache.missing, face.load_image, FaceEmbedder.embed,
+    embed_rows -> EmbeddingCache.missing, face.load_image,
+                  FaceEmbedder.embed (ArcFace) oppure FaceEmbedder.crop + lbp_descriptor (LBP),
                   EmbeddingCache.save
     Chi usa questo file da fuori:
       scripts/eval_lfw.py -> EmbeddingCache, embed_rows, cosine_distance_matrix
@@ -92,13 +93,13 @@ class EmbeddingCache:
 
     CAMPI
         path    : file su disco, es. data/lfw/embeddings_arcface_center.npz
-        vectors : dict sample_id -> embedding (512 float32)
+        vectors : dict sample_id -> vettore (512 float32 per ArcFace, 2891 per LBP)
                   es. {"Kate_Winslet_0002": array([... 512 numeri ...]), ...}
         failed  : set di sample_id senza volto rilevato, es. {"Persona_X_0003"}
 
     FORMATO DEL FILE .npz (un archivio di array numpy)
         sample_ids : array di N stringhe        ["Aaron_Eckhart_0001", ...]
-        embeddings : matrice N x 512            riga k = embedding di sample_ids[k]
+        embeddings : matrice N x 512 (N x 2891 per LBP)   riga k = vettore di sample_ids[k]
         failed     : array di stringhe          i sample_id senza volto
 
     CREATA DA : scripts/eval_lfw.py, tests/test_lfw_tools.py
@@ -167,13 +168,19 @@ class EmbeddingCache:
 
 
 def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: int = 250,
-               select: str = "largest") -> None:
-    """Calcola l'embedding dei campioni che mancano nella cache.
+               select: str = "largest", method: str = "arcface") -> None:
+    """Calcola il vettore (ArcFace o LBP) dei campioni che mancano nella cache.
 
     TEORIA
         E' il passo "feature extraction" applicato a tutto il dataset.
         Ogni foto passa da: lettura -> detection -> scelta del volto ->
-        alignment -> ArcFace (tutto dentro FaceEmbedder.embed).
+        alignment -> descrittore. Il descrittore dipende da `method`:
+            "arcface": FaceEmbedder.embed           -> embedding di 512 numeri
+            "lbp"    : FaceEmbedder.crop + lbp_descriptor -> vettore LBP di 2891 numeri
+        Detection, scelta del volto e alignment sono IDENTICI per i due
+        metodi (FaceEmbedder._detect_and_choose + norm_crop), cosi' il
+        confronto ArcFace contro LBP riguarda solo il descrittore.
+        La cache va tenuta separata per metodo (eval_lfw.py usa un file diverso).
 
     COME LO CALCOLA IL CODICE
         per ogni riga che manca nella cache:
@@ -182,6 +189,11 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
             alla persona (tramite sample_id -> subject_id del manifest)
             se non trova volti (ValueError) mette il sample_id in cache.failed
         ogni save_every foto (e alla fine) salva su disco e stampa la velocita'.
+
+    ESEMPIO (method="lbp")
+        riga {"sample_id": "Kate_Winslet_0002", "path": ".../Kate_Winslet_0002.jpg"}
+        -> load_image -> crop (112 x 112 x 3) -> lbp_descriptor -> 2891 numeri
+        -> cache.vectors["Kate_Winslet_0002"]
 
     ESEMPIO di stampa (ogni 250 foto)
         "  250/13233 immagini  (1.0 img/s, mancano ~216 min)"
@@ -196,13 +208,23 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
         select     : quale volto prendere se ce n'e' piu' di uno:
                      "largest" (il piu' grande) o "center" (il piu' vicino al
                      centro, giusto per LFW: vedi FaceEmbedder.embed)
+        method     : "arcface" (default, come prima) o "lbp"
     RESTITUISCE : nulla; il risultato e' dentro cache.vectors / cache.failed e su disco
-    CHIAMA      : EmbeddingCache.missing, face.load_image, embedder.embed,
+    CHIAMA      : EmbeddingCache.missing, face.load_image, embedder.embed (arcface)
+                  oppure embedder.crop + face.lbp.lbp_descriptor (lbp),
                   EmbeddingCache.save
     CHIAMATA DA : scripts/eval_lfw.py (nessun test la chiama: richiede il modello e
                   delle foto; la parte di embedding e' verificata in test_face_selection)
     """
     from secondlook.face import load_image
+    from secondlook.face.lbp import lbp_descriptor
+
+    if method == "arcface":
+        describe = lambda img: embedder.embed(img, select=select).embedding
+    elif method == "lbp":
+        describe = lambda img: lbp_descriptor(embedder.crop(img, select=select))
+    else:
+        raise ValueError(f"metodo sconosciuto: {method!r} (usa 'arcface' o 'lbp')")
 
     todo = cache.missing(rows)
     if not todo:
@@ -210,7 +232,7 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
     start = time.time()
     for k, r in enumerate(todo, 1):              # k parte da 1: e' il numero di foto fatte
         try:
-            cache.vectors[r["sample_id"]] = embedder.embed(load_image(r["path"]), select=select).embedding
+            cache.vectors[r["sample_id"]] = describe(load_image(r["path"]))
         except ValueError:                       # "No face detected"
             cache.failed.add(r["sample_id"])
         if k % save_every == 0 or k == len(todo):   # ogni 250 foto, e all'ultima

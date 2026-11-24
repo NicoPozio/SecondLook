@@ -76,3 +76,16 @@ def test_embed_matches_faces(embedder, group_photo, select):
     got = embedder.embed(group_photo, select=select)
     assert np.array_equal(got.bbox, expected.bbox)
     assert cosine_distance(got.embedding, expected.embedding) == pytest.approx(0.0, abs=1e-5)
+
+
+@pytest.mark.parametrize("select", ["largest", "center"])
+def test_crop_is_what_arcface_sees(embedder, group_photo, select):
+    """crop() deve dare ESATTAMENTE l'immagine che ArcFace riceve dentro embed():
+    passando il ritaglio ad ArcFace si deve ottenere lo stesso embedding.
+    Garantisce che LBP e ArcFace abbiano lo stesso preprocessing."""
+    face = embedder.crop(group_photo, select=select)
+    assert face.shape == (112, 112, 3) and face.dtype == np.uint8
+    raw = embedder._app.models["recognition"].get_feat(face).flatten()   # ArcFace sul ritaglio
+    from_crop = raw / np.linalg.norm(raw)
+    from_embed = embedder.embed(group_photo, select=select).embedding
+    assert np.allclose(from_crop, from_embed, atol=1e-5)

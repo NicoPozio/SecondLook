@@ -1,4 +1,9 @@
-"""Valutazione offline di ArcFace su LFW (Fase 2 della pipeline).
+"""Valutazione offline di ArcFace e di LBP su LFW (Fase 2 della pipeline).
+
+Il metodo si sceglie con --method (arcface, il predefinito, oppure lbp).
+Rilevamento, scelta del volto e allineamento sono identici per i due metodi:
+cambia solo il descrittore (embedding ArcFace o istogrammi LBP) e la distanza
+(coseno per ArcFace, chi-quadro per LBP).
 
 Fa tre cose:
   1. VERIFICA 1:1 sul protocollo ufficiale di LFW (6000 coppie in 10 gruppi):
@@ -9,12 +14,14 @@ Fa tre cose:
      sola immagine come sconosciuti. DIR al rango 1 con false alarm all'1% e al 10%.
 
 Uso (dalla cartella SecondLook):
-    uv run python scripts/eval_lfw.py --quick     # prova veloce, pochi minuti
-    uv run python scripts/eval_lfw.py             # tutto LFW, circa mezz'ora o piu'
+    uv run python scripts/eval_lfw.py --quick                 # ArcFace, prova veloce
+    uv run python scripts/eval_lfw.py                         # ArcFace, tutto LFW
+    uv run python scripts/eval_lfw.py --method lbp --quick    # LBP, prova veloce
+    uv run python scripts/eval_lfw.py --method lbp            # LBP, tutto LFW
 
-LFW viene scaricato in data/lfw (esclusa da git). Gli embedding vengono salvati
-in data/lfw/embeddings_arcface_center.npz: se si interrompe con Ctrl+C, al
-riavvio riparte da dove era arrivato. Se in una foto ci sono piu' volti si usa
+LFW viene scaricato in data/lfw (esclusa da git). I vettori vengono salvati
+in data/lfw/embeddings_<metodo>_center.npz (una cache per metodo): se si
+interrompe con Ctrl+C, al riavvio riparte da dove era arrivato. Se in una foto ci sono piu' volti si usa
 quello piu' vicino al centro, perche' in LFW la persona etichettata e' centrata.
 """
 
@@ -34,6 +41,55 @@ from secondlook.eval.datasets import (
 )
 from secondlook.eval.matrices import EmbeddingCache, cosine_distance_matrix, embed_rows
 from secondlook.eval.metrics import cms_curve, decidability, dir_at_false_alarm, eer
+from secondlook.face.lbp import chi2_distance_matrix
+
+
+def pair_distances(a: np.ndarray, b: np.ndarray, method: str) -> np.ndarray:
+    """Distanza coppia per coppia: riga k di a contro riga k di b (verifica 1:1).
+
+    TEORIA
+        Ogni metodo ha la sua distanza:
+            arcface -> distanza coseno    1 - cos(angolo)        da 0 a 2
+            lbp     -> distanza chi-quadro somma (a-b)^2/(a+b)   da 0 a 98 (griglia 7)
+        Qui non serve la matrice tutti-contro-tutti: per la coppia k si
+        confronta solo la riga k di a con la riga k di b.
+
+    COME LO CALCOLA IL CODICE
+        arcface: normalizza le righe e fa il prodotto scalare riga per riga,
+                 (a * b).sum(axis=1), poi 1 - quello (come face.cosine_distance)
+        lbp:     la formula di face.lbp.chi2_distance applicata riga per riga;
+                 le caselle con a + b = 0 contano 0
+
+    ESEMPIO (lbp, una sola coppia con 3 caselle)
+        a = [[0.5, 0.5, 0.0]],  b = [[1.0, 0.0, 0.0]]  ->  [0.6667]
+
+    INPUT       : a, b = matrici N x d allineate (riga k = le due foto della coppia k);
+                  method = "arcface" o "lbp"
+    RESTITUISCE : vettore di N distanze
+    CHIAMA      : np.linalg.norm (arcface), solo numpy (lbp)
+    CHIAMATA DA : main
+    """
+    if method == "arcface":
+        a = a / np.linalg.norm(a, axis=1, keepdims=True)
+        b = b / np.linalg.norm(b, axis=1, keepdims=True)
+        # (a * b).sum(axis=1) = prodotto scalare riga per riga -> N numeri
+        return 1.0 - (a * b).sum(axis=1)
+    num = (a - b) ** 2
+    den = a + b
+    return np.sum(num / np.where(den > 0, den, 1.0), axis=1)
+
+
+def distance_matrix(probes: np.ndarray, gallery: np.ndarray, method: str) -> np.ndarray:
+    """Matrice probe x gallery con la distanza del metodo scelto.
+
+    arcface -> eval/matrices.cosine_distance_matrix (prodotto tra matrici, veloce)
+    lbp     -> face/lbp.chi2_distance_matrix (a blocchi da 8 probe, per la memoria:
+               8 x 1677 x 2891 numeri = circa 155 MB per blocco)
+    CHIAMATA DA : main (D_known e D_unknown)
+    """
+    if method == "arcface":
+        return cosine_distance_matrix(probes, gallery)
+    return chi2_distance_matrix(probes, gallery, block=8)
 
 
 def ten_fold_accuracy(dist: np.ndarray, same: np.ndarray, folds: np.ndarray) -> tuple[float, float]:
@@ -96,11 +152,16 @@ def main() -> None:
         0. dati:          download_lfw, lfw_manifest, write_manifest,
                           read_lfw_pairs, split_gallery_probes
         1. embedding:     EmbeddingCache, embed_rows (-> FaceEmbedder.embed)
-        2. verifica:      distanza coppia per coppia, eer, decidability,
-                          ten_fold_accuracy
-        3. closed-set:    cosine_distance_matrix, cms_curve
-        4. open-set:      cosine_distance_matrix, dir_at_false_alarm
-        5. salvataggio:   results_arcface(_quick).json
+        2. verifica:      pair_distances, eer, decidability, ten_fold_accuracy
+        3. closed-set:    distance_matrix, cms_curve
+        4. open-set:      distance_matrix, dir_at_false_alarm
+        5. salvataggio:   results_<metodo>(_quick).json
+
+    COSA CAMBIA CON --method lbp
+        solo il descrittore (embed_rows con method="lbp"), la cache
+        (embeddings_lbp_center.npz), la distanza (pair_distances e
+        distance_matrix) e il file dei risultati (results_lbp.json).
+        Coppie, divisione gallery/probe e metriche sono le stesse.
 
     DOVE SI SEPARANO GENUINI/IMPOSTORI E DOVE ENTRANO I NOMI
         - verifica: la lista `same` (da pairs.txt) divide dist in
@@ -109,7 +170,7 @@ def main() -> None:
           delle righe (k_ids) e delle colonne (g_ids) vengono dal manifest, nello
           stesso ordine con cui si sono costruite le matrici
 
-    CHIAMATA DA : riga di comando (uv run python scripts/eval_lfw.py [--quick])
+    CHIAMATA DA : riga di comando (uv run python scripts/eval_lfw.py [--method lbp] [--quick])
     """
     # avviso interno di insightface (usa una funzione di scikit-image dichiarata superata):
     # non riguarda il nostro codice, quindi lo si nasconde come fa gia' pytest
@@ -118,7 +179,10 @@ def main() -> None:
     parser.add_argument("--root", default="data/lfw", help="cartella di LFW (default: data/lfw)")
     parser.add_argument("--quick", action="store_true",
                         help="prova veloce: un solo gruppo di coppie e 100 persone per l'identificazione")
+    parser.add_argument("--method", choices=["arcface", "lbp"], default="arcface",
+                        help="descrittore del volto: arcface (default) o lbp")
     args = parser.parse_args()
+    method = args.method
 
     # --- 0. dati ------------------------------------------------------------
     root = download_lfw(args.root)                        # scarica solo la prima volta
@@ -149,24 +213,22 @@ def main() -> None:
     # possono comparire volti di altre persone anche piu' grandi: si prende quindi
     # il volto piu' vicino al centro. La cache ha un nome diverso da quella fatta
     # con il volto piu' grande, cosi' i due tipi di embedding non si mescolano.
-    cache = EmbeddingCache(Path(root) / "embeddings_arcface_center.npz")
+    # Una cache per metodo: es. embeddings_arcface_center.npz, embeddings_lbp_center.npz
+    cache = EmbeddingCache(Path(root) / f"embeddings_{method}_center.npz")
     todo = cache.missing([by_id[s] for s in sorted(needed)])   # righe ancora da calcolare
     print(f"embedding: {len(needed) - len(todo)} gia' in cache, {len(todo)} da calcolare")
     if todo:
-        embed_rows(todo, FaceEmbedder(), cache, select="center")
-    results = {"quick": args.quick, "face_selection": "center",
+        embed_rows(todo, FaceEmbedder(), cache, select="center", method=method)
+    results = {"method": method, "quick": args.quick, "face_selection": "center",
                "faces_not_detected": len(cache.failed & needed)}
 
     # --- 2. verifica sulle coppie ufficiali --------------------------------
     # coppie in cui entrambe le foto hanno un volto rilevato
     usable = [p for p in pairs if p.sample_a in cache.vectors and p.sample_b in cache.vectors]
-    a = cache.get([p.sample_a for p in usable])      # riga k = prima foto della coppia k   (N x 512)
-    b = cache.get([p.sample_b for p in usable])      # riga k = seconda foto della coppia k (N x 512)
-    a = a / np.linalg.norm(a, axis=1, keepdims=True)
-    b = b / np.linalg.norm(b, axis=1, keepdims=True)
+    a = cache.get([p.sample_a for p in usable])      # riga k = prima foto della coppia k   (N x 512, o N x 2891 per LBP)
+    b = cache.get([p.sample_b for p in usable])      # riga k = seconda foto della coppia k
     # qui NON serve la matrice: si confronta solo la riga k di a con la riga k di b.
-    # (a * b).sum(axis=1) = prodotto scalare riga per riga -> N numeri
-    dist = 1.0 - (a * b).sum(axis=1)                 # distanza coseno coppia per coppia
+    dist = pair_distances(a, b, method)              # coseno (arcface) o chi-quadro (lbp), coppia per coppia
     same = np.array([p.same for p in usable])        # es. [True, True, ..., False, False]
     folds = np.array([p.fold for p in usable])
     # dist[same] = solo le distanze delle coppie genuine, dist[~same] (~ = "non") le impostore
@@ -192,9 +254,9 @@ def main() -> None:
     if not gallery or not known or not unknown:
         raise SystemExit("identificazione impossibile: servono gallery, probe registrati e sconosciuti "
                          f"(trovati {len(gallery)}, {len(known)}, {len(unknown)} con volto rilevato)")
-    G = cache.get([r["sample_id"] for r in gallery])                                    # template (n_gallery x 512)
-    D_known = cosine_distance_matrix(cache.get([r["sample_id"] for r in known]), G)     # (n_registrati x n_gallery)
-    D_unknown = cosine_distance_matrix(cache.get([r["sample_id"] for r in unknown]), G)  # (n_sconosciuti x n_gallery)
+    G = cache.get([r["sample_id"] for r in gallery])                                    # template (n_gallery x 512, o x 2891)
+    D_known = distance_matrix(cache.get([r["sample_id"] for r in known]), G, method)     # (n_registrati x n_gallery)
+    D_unknown = distance_matrix(cache.get([r["sample_id"] for r in unknown]), G, method)  # (n_sconosciuti x n_gallery)
     k_ids = [r["subject_id"] for r in known]         # nome VERO di ogni riga di D_known
     cms = cms_curve(D_known, k_ids, g_ids)           # cms[0] = RR, cms[4] = CMS(5), ...
     results["closed_set"] = {
@@ -211,6 +273,7 @@ def main() -> None:
 
     # --- 5. stampa e salvataggio -------------------------------------------
     v, c = results["verification"], results["closed_set"]
+    print(f"\nmetodo: {method}")
     print("\n=== VERIFICA 1:1 (coppie ufficiali LFW) ===")
     print(f"coppie usate        {v['pairs_used']}  (escluse per volto non trovato: {v['pairs_skipped']})")
     print(f"EER                 {v['eer'] * 100:.2f} %   alla soglia {v['eer_threshold']:.3f}")
@@ -226,7 +289,7 @@ def main() -> None:
     for key in ("dir_at_fa_1pct", "dir_at_fa_10pct"):
         o = open_set[key]
         print(f"false alarm {o['false_alarm'] * 100:5.2f} %  ->  DIR {o['dir'] * 100:.2f} %  (soglia {o['threshold']:.3f})")
-    out = Path(root) / ("results_arcface_quick.json" if args.quick else "results_arcface.json")
+    out = Path(root) / (f"results_{method}_quick.json" if args.quick else f"results_{method}.json")
     out.write_text(json.dumps(results, indent=2))
     print(f"\nrisultati salvati in {out}")
 

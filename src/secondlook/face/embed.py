@@ -20,18 +20,21 @@ COSA C'E' IN QUESTO FILE
     FaceSample        contenitore: embedding + riquadro + confidenza di UN volto
     cosine_distance   distanza tra DUE embedding (0 = stessa direzione)
     load_image        legge un file immagine dal disco
-    FaceEmbedder      carica i modelli; .faces() = tutti i volti, .embed() = un volto
+    FaceEmbedder      carica i modelli; .faces() = tutti i volti, .embed() = un volto,
+                      .crop() = ritaglio allineato 112 x 112 di un volto (per LBP)
     select_face       sceglie un volto tra quelli trovati ("largest" o "center")
     _area, _center_distance   funzioni di supporto per select_face
 
 MAPPA DELLE CHIAMATE
-    load_image ──> FaceEmbedder.embed ──> select_face ──> _area / _center_distance
-                          │
-                          └──> FaceSample (risultato)
+    load_image ──> FaceEmbedder.embed ─┐
+                                       ├──> _detect_and_choose ──> select_face ──> _area / _center_distance
+                   FaceEmbedder.crop ──┘
+    embed: poi alignment + ArcFace -> FaceSample (risultato)
+    crop:  poi alignment (norm_crop) -> ritaglio 112 x 112 (va a face/lbp.py)
     cosine_distance: usata DOPO, per confrontare due FaceSample.embedding
 
     Chi usa questo file da fuori:
-      eval/matrices.py  embed_rows  -> load_image, FaceEmbedder.embed
+      eval/matrices.py  embed_rows  -> load_image, FaceEmbedder.embed / FaceEmbedder.crop
       scripts/compare_faces.py      -> load_image, FaceEmbedder.embed, cosine_distance
       tests/test_embed.py, tests/test_face_selection.py
 """
@@ -169,6 +172,7 @@ class FaceEmbedder:
     METODI
         faces(img)  -> TUTTI i volti, ognuno con il suo embedding
         embed(img)  -> UN solo volto scelto, embedding solo di quello (piu' veloce)
+        crop(img)   -> UN solo volto scelto, ritaglio allineato 112 x 112 (per LBP)
 
     CHIAMA       : insightface.app.FaceAnalysis (costruttore)
     CREATO DA    : scripts/eval_lfw.py, scripts/compare_faces.py, i test
@@ -257,6 +261,7 @@ class FaceEmbedder:
             1. solo DETECTION (veloce) su tutta la foto: riquadri + 5 punti
                per ogni volto, ancora nessun embedding.
             2. sceglie un volto con select_face, guardando solo i riquadri.
+               (1 e 2 stanno in _detect_and_choose, condivisa con crop per LBP)
             3. ALIGNMENT + ArcFace SOLO sul volto scelto. Cosi' una foto con 6
                volti costa 1 embedding invece di 6. Il risultato e' identico a
                quello di faces() per lo stesso volto (lo verifica il test
@@ -293,29 +298,13 @@ class FaceEmbedder:
                       (embed_rows lo intercetta e mette il campione in cache.failed);
                       ValueError da select_face se `select` non e' valido.
 
-        CHIAMA       : det_model.detect (SCRFD), FaceSample, select_face,
+        CHIAMA       : _detect_and_choose (-> SCRFD, select_face),
                        insightface Face, models["recognition"].get (alignment + ArcFace)
         CHIAMATA DA  : eval/matrices.embed_rows, scripts/compare_faces.py,
                        tests/test_embed.py, tests/test_face_selection.py
         """
-        # 1. solo detection (SCRFD). max_num=0 = nessun limite al numero di volti.
-        #    bboxes: una riga per volto [x1, y1, x2, y2, det_score]   es. forma (6, 5)
-        #    kpss:   5 punti (x, y) per volto                         es. forma (6, 5, 2)
-        bboxes, kpss = self._app.det_model.detect(img, max_num=0)
-        if len(bboxes) == 0:
-            raise ValueError("No face detected")
-        # FaceSample "provvisori": embedding vuoto (np.empty(0)), servono solo
-        # riquadro e confidenza per poter usare select_face
-        candidates = [
-            FaceSample(embedding=np.empty(0, np.float32), bbox=b[:4].astype(int), det_score=float(b[4]))
-            for b in bboxes      # b = [466.08, 268.62, 573.59, 415.53, 0.92] -> bbox [466, 268, 573, 415]
-        ]
-        # 2. scelta del volto, prima di calcolare qualsiasi embedding
-        chosen = select_face(candidates, img.shape, select)
-        # k = posizione del volto scelto nella lista (es. 0 con "center"), per
-        # ritrovare le sue coordinate float e i suoi 5 punti in bboxes/kpss.
-        # "is" confronta l'oggetto stesso, non il contenuto.
-        k = next(i for i, c in enumerate(candidates) if c is chosen)
+        # 1. e 2. detection + scelta del volto: la STESSA funzione usata da crop() per LBP
+        bboxes, kpss, k, chosen = self._detect_and_choose(img, select)
         # 3. alignment + ArcFace solo sul volto scelto
         from insightface.app.common import Face
 
@@ -329,6 +318,92 @@ class FaceEmbedder:
             bbox=chosen.bbox,
             det_score=chosen.det_score,
         )
+
+    def _detect_and_choose(self, img: np.ndarray, select: str):
+        """Passi 1 e 2 comuni a embed() (ArcFace) e crop() (LBP): rileva i volti e ne sceglie uno.
+
+        TEORIA
+            Per confrontare ArcFace e LBP in modo onesto, il volto deve essere
+            trovato, scelto e ritagliato ESATTAMENTE nello stesso modo per i
+            due metodi: cosi' la differenza nei risultati dipende solo dal
+            descrittore. Per garantirlo, questi passi esistono in un solo
+            posto, questa funzione, e la usano sia embed() sia crop().
+
+        COME LO CALCOLA IL CODICE
+            1. SCRFD trova tutti i volti: riquadri + 5 punti per volto
+            2. select_face sceglie un volto guardando solo i riquadri
+            3. k = posizione del volto scelto, per ritrovare i suoi 5 punti
+
+        ESEMPIO (t1.jpg, select="center")
+            bboxes forma (6, 5), kpss forma (6, 5, 2), k = 0,
+            chosen.bbox = [466, 268, 573, 415]
+            (i valori completi sono nell'ESEMPIO di embed)
+
+        INPUT       : img = immagine BGR; select = "largest" o "center"
+        RESTITUISCE : (bboxes, kpss, k, chosen)
+                      bboxes = tutti i riquadri [x1, y1, x2, y2, det_score]
+                      kpss   = i 5 punti di ogni volto
+                      k      = indice del volto scelto
+                      chosen = FaceSample del volto scelto (embedding vuoto)
+        SOLLEVA     : ValueError("No face detected") se non c'e' nessun volto
+        CHIAMA      : det_model.detect (SCRFD), FaceSample, select_face
+        CHIAMATA DA : embed, crop
+        """
+        # max_num=0 = nessun limite al numero di volti.
+        #    bboxes: una riga per volto [x1, y1, x2, y2, det_score]   es. forma (6, 5)
+        #    kpss:   5 punti (x, y) per volto                         es. forma (6, 5, 2)
+        bboxes, kpss = self._app.det_model.detect(img, max_num=0)
+        if len(bboxes) == 0:
+            raise ValueError("No face detected")
+        # FaceSample "provvisori": embedding vuoto (np.empty(0)), servono solo
+        # riquadro e confidenza per poter usare select_face
+        candidates = [
+            FaceSample(embedding=np.empty(0, np.float32), bbox=b[:4].astype(int), det_score=float(b[4]))
+            for b in bboxes      # b = [466.08, 268.62, 573.59, 415.53, 0.92] -> bbox [466, 268, 573, 415]
+        ]
+        # scelta del volto, prima di calcolare qualsiasi embedding
+        chosen = select_face(candidates, img.shape, select)
+        # k = posizione del volto scelto nella lista (es. 0 con "center"), per
+        # ritrovare le sue coordinate float e i suoi 5 punti in bboxes/kpss.
+        # "is" confronta l'oggetto stesso, non il contenuto.
+        k = next(i for i, c in enumerate(candidates) if c is chosen)
+        return bboxes, kpss, k, chosen
+
+    def crop(self, img: np.ndarray, select: str = "largest") -> np.ndarray:
+        """Il ritaglio allineato 112 x 112 del volto scelto: l'ingresso di LBP.
+
+        TEORIA
+            E' ESATTAMENTE l'immagine che ArcFace riceve dentro embed():
+            stessa detection, stessa scelta del volto (_detect_and_choose) e
+            stesso allineamento (norm_crop di insightface, con gli stessi
+            5 punti e la stessa dimensione). Cosi' LBP e ArcFace vedono lo
+            stesso volto, pixel per pixel, e il confronto tra i due riguarda
+            solo il descrittore. Lo verifica il test
+            test_crop_is_what_arcface_sees: passando questo ritaglio ad
+            ArcFace si ottiene lo stesso embedding di embed().
+
+        COME LO CALCOLA IL CODICE
+            1. _detect_and_choose -> 5 punti del volto scelto
+            2. norm_crop: trasformazione (rotazione + scala + spostamento) che
+               porta i 5 punti nelle posizioni standard, e ritaglio del
+               quadrato di lato input_size (112 per il modello di buffalo_l)
+
+        ESEMPIO
+            t1.jpg (1280 x 886 x 3), select="center" -> immagine 112 x 112 x 3,
+            con gli occhi del volto centrale nelle posizioni standard
+
+        INPUT       : come embed (img BGR, select "largest" o "center")
+        RESTITUISCE : immagine BGR uint8 di forma (112, 112, 3)
+        SOLLEVA     : ValueError("No face detected") se non c'e' nessun volto
+        CHIAMA      : _detect_and_choose, insightface face_align.norm_crop
+        CHIAMATA DA : eval/matrices.embed_rows (method="lbp"),
+                      tests/test_face_selection.py
+        """
+        from insightface.utils.face_align import norm_crop
+
+        _, kpss, k, _ = self._detect_and_choose(img, select)
+        size = self._app.models["recognition"].input_size[0]   # 112, la stessa che usa ArcFace
+        return norm_crop(img, landmark=kpss[k], image_size=size)
 
 
 def select_face(samples: list[FaceSample], image_shape, select: str = "largest") -> FaceSample:
@@ -361,7 +436,7 @@ def select_face(samples: list[FaceSample], image_shape, select: str = "largest")
     SOLLEVA     : ValueError se select non e' "largest" o "center"
 
     CHIAMA       : _area, _center_distance
-    CHIAMATA DA  : FaceEmbedder.embed, tests/test_face_selection.py
+    CHIAMATA DA  : FaceEmbedder._detect_and_choose (quindi embed e crop), tests/test_face_selection.py
     """
     if select == "largest":
         return max(samples, key=lambda s: _area(s.bbox))
