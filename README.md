@@ -40,13 +40,14 @@ Al primo utilizzo insightface scarica automaticamente il pacchetto di modelli `b
 uv run pytest -v
 ```
 
-Devono passare tutti i 39 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
+Devono passare tutti i 43 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
 
 | File di test | Cosa controlla |
 |---|---|
 | `tests/test_embed.py` | distanza coseno, rilevamento dei volti, stesso volto più vicino degli altri, errore se non c'è nessun volto |
 | `tests/test_face_selection.py` | scelta del volto quando in una foto ce n'è più di uno (`largest` e `center`); il ritaglio per LBP è identico a quello che riceve ArcFace |
 | `tests/test_lbp.py` | codici LBP calcolati a mano, pattern uniformi, istogrammi a griglia, distanza chi-quadro |
+| `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
 | `tests/test_metrics.py` | FAR, FRR, ROC, EER, d′, CMS, DIR, calcolati su esempi piccoli verificabili a mano |
 | `tests/test_lfw_tools.py` | manifest, lettura di `pairs.txt`, divisione gallery/probe, matrice delle distanze, cache degli embedding, su un mini LFW finto |
 
@@ -166,7 +167,7 @@ SecondLook/
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (39 test)
+  tests/                  test con pytest (43 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 
