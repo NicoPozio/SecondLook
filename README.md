@@ -11,7 +11,7 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | fatta (27 novembre): SRR, margine, Weibull, qualità (SP, SI, SY), PRR/AUROC, Viola-Jones, impostore con foto ottima; MagFace da decidere |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | fatta (27 novembre): SRR, margine, Weibull, qualità (SP, SI, SY), incertezza appresa (MagFace), PRR/AUROC, Viola-Jones, impostore con foto ottima |
 | 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
@@ -54,6 +54,7 @@ Devono passare tutti i 79 test. I test sul modello scaricano `buffalo_l` se non 
 | `tests/test_metarecognition.py` | meta-recognition di Weibull: casi A e B, uso della sola coda, una distanza per persona |
 | `tests/test_reliability_metrics.py` | curva errore contro rifiuto, PRR e AUROC sugli esempi a mano, pareggi |
 | `tests/test_detect.py` | IoU e ritaglio quadrato a mano, detection rate, Viola-Jones sulla foto di gruppo, `embed_crop` uguale a `embed` (salta se OpenCV non ha Viola-Jones) |
+| `tests/test_magface.py` | preparazione dell'input a mano, messaggio se manca il modello, foto sfocata più corta di quella nitida (salta se manca il modello) |
 | `tests/test_hard_impostors.py` | soglie della "foto ottima" sul tuning e quota lasciata passare, su esempi a mano |
 | `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori, PRR e AUROC per tipo di errore |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
@@ -173,16 +174,33 @@ Ogni colonna è un solo punto di lavoro. Il confronto a **tutte le soglie** usa 
 | ArcFace distanza dalla soglia | 0,997 | 0,9985 | 0,90 | 0,9990 |
 | ArcFace Weibull | 0,996 | 0,9980 | 0,92 | 0,9983 |
 | ArcFace qualità SP / SI / SY | 0,00 / 0,02 / −0,00 | 0,50 / 0,51 / 0,50 | 0,44 / 0,60 / 0,63 | 0,50 / 0,51 / 0,50 |
+| ArcFace incertezza appresa (MagFace) | 0,13 | 0,56 | 0,40 | 0,57 |
 | LBP SRR relative | 0,532 | 0,766 | 0,77 | 0,77 |
 | LBP SRR density | 0,364 | 0,682 | 0,68 | 0,69 |
 | LBP margine | 0,528 | 0,764 | 0,76 | 0,77 |
 | LBP distanza dalla soglia | 0,404 | 0,702 | 0,69 | 0,72 |
 | LBP Weibull | 0,494 | 0,747 | 0,75 | 0,75 |
 | LBP qualità SP / SI / SY | 0,06 / 0,08 / 0,18 | 0,53 / 0,54 / 0,59 | 0,53 / 0,54 / 0,59 | 0,53 / 0,54 / 0,58 |
+| LBP incertezza appresa (MagFace) | 0,06 | 0,53 | 0,51 | 0,57 |
 
 Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test gli scambi di persona sono solo 9, quindi il loro AUROC è poco stabile). Con LBP la relative distance e il margine sono pari e i migliori; Weibull è subito dietro, il density ratio e la distanza dalla soglia sono nettamente peggiori. Gli indici di qualità della foto non prevedono gli errori (PRR vicino a 0, cioè come il caso): non distinguono uno sconosciuto da un registrato, perché le loro foto sono belle uguali. Solo la simmetria aiuta un po' con LBP (PRR 0,18), che soffre i volti girati.
 
 Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
+
+## Incertezza appresa: MagFace
+
+`src/secondlook/face/magface.py` calcola il quarto candidato della Domanda 1, l'**incertezza appresa**: la lunghezza del vettore di **MagFace** (Meng e colleghi, CVPR 2021), una rete addestrata in modo che la lunghezza cresca con la qualità del volto (tra 10 e 110). Usa i pesi ufficiali iResNet100 / MS1MV2 e lo stesso ritaglio allineato di ArcFace, LBP e qualità; come SP, SI e SY guarda solo la foto.
+
+Il modello non è nel repository. Per prepararlo, una volta sola:
+
+1. scaricare `magface_epoch_00025.pth` (iResNet100, MS1MV2) dal README di [MagFace](https://github.com/IrvingMeng/MagFace) e metterlo in `data/models/`;
+2. convertirlo in ONNX: `python tools/magface_to_onnx.py --repo <cartella del codice di MagFace>`. Serve PyTorch solo per questo passo (`pip install torch onnx`, fuori dal progetto); lo script controlla che ONNX e PyTorch diano gli stessi vettori. Il risultato è `data/models/magface_iresnet100.onnx`, che il progetto esegue con `onnxruntime`.
+
+```bash
+uv run python scripts/eval_srr.py     # se c'è data/lfw/magface_center.npz, MagFace entra tra i criteri
+```
+
+Le lunghezze di tutto LFW si calcolano con `embed_rows(..., method="magface")` (circa 3 ore su CPU) e si salvano in `data/lfw/magface_center.npz`. Risultati sulla metà test: con ArcFace PRR 0,129 e AUROC 0,565, il migliore dei criteri sulla foto (SP, SI, SY circa 0) ma lontanissimo da quelli sulle distanze (0,997); con LBP PRR 0,064. Anche una qualità appresa non sa se la persona è registrata. Il piccolo segnale sugli sconosciuti è probabilmente un effetto di LFW: le persone con una sola foto hanno vettori un po' più corti.
 
 ## Impostore molto simile, foto ottima
 
@@ -257,6 +275,7 @@ SecondLook/
     face/embed.py         rilevamento (SCRFD), scelta del volto, allineamento, embedding ArcFace e ritaglio per LBP
     face/lbp.py           LBP a griglia (uniformi, 7 x 7) e distanza chi-quadro
     face/quality.py       indici di qualità SP (posa), SI (illuminazione), SY (simmetria)
+    face/magface.py       incertezza appresa: lunghezza del vettore MagFace (modello ONNX)
     face/detect.py        Viola-Jones, IoU, ritaglio quadrato senza allineamento, confronto con SCRFD
     eval/datasets.py      manifest nel formato comune, download di LFW, coppie di pairs.txt, divisione gallery/probe
     eval/matrices.py      cache degli embedding (.npz) e matrice delle distanze probe x gallery
@@ -275,7 +294,8 @@ SecondLook/
     eval_srr.py           valutazione di SRR, margine, Weibull e qualità su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (86 test)
+    magface_to_onnx.py    conversione una tantum dei pesi di MagFace da PyTorch a ONNX
+  tests/                  test con pytest (89 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 
@@ -293,6 +313,8 @@ Tutto ciò che sta in `data/` è escluso da git:
 | cache delle misure di qualità | `data/lfw/quality_center.npz` |
 | confronto tra detector | `data/lfw/detectors_center.npz`, `data/lfw/embeddings_arcface_noalign_center.npz`, `data/lfw/embeddings_arcface_vj_center.npz`, `data/lfw/results_detectors.json` |
 | impostori con foto ottima | `data/lfw/results_hard_impostors_<metodo>.json` |
+| lunghezze MagFace | `data/lfw/magface_center.npz` |
+| modello MagFace (pesi originali e ONNX) | `data/models/magface_epoch_00025.pth`, `data/models/magface_iresnet100.onnx` |
 | file della cascata di Viola-Jones | `data/models/haarcascade_frontalface_default.xml` (scaricato da solo) |
 | risultati della valutazione | `data/lfw/results_arcface.json`, `data/lfw/results_lbp.json`, `data/lfw/results_srr_<metodo>.json` |
 | raccolte del gruppo (volto, keystroke, JSON dei timestamp) | sotto `data/` |

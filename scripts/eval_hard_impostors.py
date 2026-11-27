@@ -35,7 +35,7 @@ import numpy as np
 from eval_srr import QUALITY, evaluate_kind, prepare      # stessa cartella degli script
 from secondlook.reliability.srr import srr
 
-COMPARED = ("relative", "margin", "threshold", "weibull", "sp", "si", "sy")    # criteri messi a confronto
+COMPARED = ("relative", "margin", "threshold", "weibull", "sp", "si", "sy", "magface")   # criteri a confronto
 TOP_QUANTILE = 0.75                                                # "foto ottima" = quarto migliore
 
 
@@ -99,7 +99,8 @@ def main() -> None:
     kt, ut = p["known_tuning"], p["unknown_tuning"]
 
     # --- 2. valore critico di ogni criterio, stimato sul tuning --------------
-    critical = {c: evaluate_kind(sk[c], correct, kt, su[c], ut, normalize=False)["critical"] for c in COMPARED}
+    compared = [c for c in COMPARED if c in p["criteria"]]      # MagFace solo se c'e' la sua cache
+    critical = {c: evaluate_kind(sk[c], correct, kt, su[c], ut, normalize=False)["critical"] for c in compared}
 
     # le righe del test, in un unico elenco: prima i registrati, poi gli sconosciuti
     test_known, test_unknown = ~kt, ~ut
@@ -121,11 +122,11 @@ def main() -> None:
     # --- 4. chi le lascia passare? -------------------------------------------
     names = {"relative": "SRR relative distance", "margin": "margine top-1/top-2",
              "threshold": "solo soglia (d1 < t)", "weibull": "Weibull",
-             "sp": "qualita' SP", "si": "qualita' SI", "sy": "qualita' SY"}
+             "sp": "qualita' SP", "si": "qualita' SI", "sy": "qualita' SY", "magface": "MagFace (appresa)"}
     table = {}
     print(f"\n{'criterio':24s} {'sbagliate con foto ottima':>27s} {'tutte le sbagliate':>20s} {'step-up inutili (giuste, foto ottima)':>40s}")
     print(f"{'':24s} {'lasciate passare':>27s} {'lasciate passare':>20s}")
-    for c in COMPARED:
+    for c in compared:
         table[c] = {"critical": critical[c],
                     "hard_let_through": let_through(score[c][hard], critical[c]),
                     "all_wrong_let_through": let_through(score[c][~good], critical[c]),
@@ -148,6 +149,7 @@ def main() -> None:
               "d1": float(d[first]), "d2": float(d[second]),
               "srr": float(srr(np.array([score["relative"][i]]), phi_bar)[0]),
               **{q: float(score[q][i]) for q in QUALITY},
+              **({"magface": float(score["magface"][i])} if "magface" in score else {}),
               "passa_qualita": [q for q in QUALITY if score[q][i] > critical[q]],
               "passa_srr": bool(score["relative"][i] > phi_bar),
               "passa_soglia": bool(score["threshold"][i] > critical["threshold"])}

@@ -1,4 +1,4 @@
-"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2-5.6).
+"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2-5.6 e 5.10).
 
 Domanda: l'SRR riesce a capire quando la risposta del primo stadio (identificazione
 open-set contro tutta la gallery) e' sbagliata? E come se la cavano i criteri piu'
@@ -21,6 +21,8 @@ Cosa fa:
      e, se esiste la cache data/lfw/quality_center.npz, i tre indici di QUALITA'
      della foto (calcolati prima del confronto, uguali per ArcFace e LBP):
         sp  posa,  si  illuminazione,  sy  simmetria   (face/quality.py)
+     e, se esiste data/lfw/magface_center.npz, l'INCERTEZZA APPRESA:
+        magface  lunghezza del vettore MagFace          (face/magface.py)
   4. divide le PERSONE a meta': sulla meta' "tuning" stima il valore critico di
      ogni criterio, sulla meta' "test" misura gli errori con quel valore fisso
      ATTENZIONE: un solo punto per criterio, utile ma non per dire chi vince.
@@ -297,6 +299,14 @@ def prepare(root: Path, method: str) -> dict:
         results["quality_r0"] = r0
     else:
         print("cache della qualita' assente o incompleta: SP, SI, SY non valutati")
+    # incertezza appresa: lunghezza del vettore MagFace (face/magface.py), gia' "piu' alto = piu' affidabile"
+    m_cache = EmbeddingCache(root / "magface_center.npz")
+    if all(sid in m_cache.vectors for sid in k_samples + u_samples):
+        s_known["magface"] = m_cache.get(k_samples)[:, 0].astype(float)
+        s_unknown["magface"] = m_cache.get(u_samples)[:, 0].astype(float)
+        criteria.append("magface")
+    else:
+        print("cache di MagFace assente o incompleta: incertezza appresa non valutata")
     return {"results": results, "criteria": criteria, "s_known": s_known, "s_unknown": s_unknown,
             "correct": correct, "known_tuning": known_tuning, "unknown_tuning": unknown_tuning,
             "known": known, "unknown": unknown, "ids": ids, "red_known": reduced, "red_unknown": reduced_u}
@@ -341,7 +351,8 @@ def main() -> None:
     names = {"relative": "SRR relative distance (phi_bar)", "density": "SRR density ratio (phi_bar)",
              "margin": "margine top-1/top-2", "threshold": "distanza dalla soglia (soglia t)",
              "weibull": "meta-recognition di Weibull", "sp": "qualita': posa (SP)",
-             "si": "qualita': illuminazione (SI)", "sy": "qualita': simmetria (SY)"}
+             "si": "qualita': illuminazione (SI)", "sy": "qualita': simmetria (SY)",
+             "magface": "incertezza appresa (MagFace)"}
     for c in criteria:
         r = results[c]
         crit = r.get("acceptance_threshold", r["critical"])
