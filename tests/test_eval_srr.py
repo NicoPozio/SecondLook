@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from eval_srr import criteria_scores, evaluate_kind, split_subjects  # noqa: E402
+from eval_srr import criteria_scores, evaluate_kind, split_subjects, threshold_free  # noqa: E402
 
 
 def test_split_is_half_by_person_and_repeatable():
@@ -47,3 +47,17 @@ def test_margin_has_no_srr_medians():
                       np.array([True, True, False]), np.array([0.05, 0.2]), np.array([True, False]),
                       normalize=False)
     assert "srr_median_correct" not in r
+
+
+def test_threshold_free_by_hand():
+    # test: giuste [0.9, 0.8, 0.4], uno scambio [0.6], uno sconosciuto [0.2]; il tuning (0.5) e' escluso
+    phi_known = np.array([0.5, 0.9, 0.8, 0.6, 0.4])
+    correct = np.array([True, True, True, False, True])
+    known_tuning = np.array([True, False, False, False, False])
+    r = threshold_free(phi_known, correct, known_tuning, np.array([0.2]), np.array([False]))
+    assert r["prr"] == pytest.approx(2 / 3)
+    assert r["auroc_all"] == pytest.approx(5 / 6)
+    assert r["auroc_swap"] == pytest.approx(2 / 3)       # 0.9, 0.8 > 0.6; 0.4 < 0.6
+    assert r["auroc_unknown"] == 1.0
+    assert (r["n_swap"], r["n_unknown"]) == (1, 1)
+    assert r["curve"]["error"][0] == pytest.approx(0.4) and r["curve"]["error"][-1] == 0.0

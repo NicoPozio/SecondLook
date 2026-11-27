@@ -36,9 +36,11 @@ MAPPA DELLE CHIAMATE
                      _as_array <- decidability
     identificazione: _per_identity, _true_rank_and_distance <- cms_curve
                                                             <- open_set_rates <- dir_at_false_alarm
+    affidabilita':   error_reject_curve <- prr;  auroc
     Chi usa questo file da fuori:
       scripts/eval_lfw.py -> eer, decidability, cms_curve, dir_at_false_alarm
-      tests/test_metrics.py -> tutte
+      scripts/eval_srr.py -> _per_identity, _true_rank_and_distance, error_reject_curve, prr, auroc
+      tests/test_metrics.py, tests/test_reliability_metrics.py
 """
 
 from __future__ import annotations
@@ -501,3 +503,122 @@ def dir_at_false_alarm(dist_known, known_ids, dist_unknown, gallery_ids, target_
     _, dir_rates, fa_rates = open_set_rates(dist_known, known_ids, dist_unknown,
                                             gallery_ids, [threshold], rank)
     return float(dir_rates[0]), float(threshold), float(fa_rates[0])
+
+
+# ---------------------------------------------------------------------------
+# Valutazione di un criterio di affidabilita' (Fase 5)
+# ---------------------------------------------------------------------------
+#
+# Qui non si valuta il riconoscimento, ma un CRITERIO che dice quanto e'
+# affidabile ogni risposta (SRR, margine, ...). Gli input sono sempre:
+#   scores  = valore del criterio per ogni risposta, PIU' ALTO = PIU' AFFIDABILE
+#   correct = True se la risposta era giusta (dalle etichette)
+# Nessuna soglia: si guarda il criterio a TUTTE le soglie insieme.
+#
+# Esempio usato nelle funzioni qui sotto (5 risposte, G = giusta, S = sbagliata):
+#   scores  = [0.9, 0.8, 0.6, 0.4, 0.2]
+#   correct = [ G,   G,   S,   G,   S ]
+
+def error_reject_curve(scores, correct):
+    """Curva errore contro rifiuto: quanti errori restano se si rifiutano le risposte meno affidabili.
+
+    TEORIA
+        Si mettono in fila le risposte dalla MENO alla PIU' affidabile e si
+        immagina di rifiutarne (nel login: mandarle allo step-up) una quota
+        crescente, partendo dal fondo della fila. Per ogni quota r si guarda
+        l'errore che RESTA tra quelle accettate, contato su tutte le risposte:
+            errore(r) = risposte sbagliate non ancora rifiutate / N
+        Parte dalla quota di errori totale (r = 0) e arriva a 0 (r = 1).
+        Un buon criterio la fa scendere in fretta: mette gli errori in fondo.
+
+    COME LO CALCOLA IL CODICE
+        Ordina i valori distinti del criterio dal piu' piccolo. Risposte con lo
+        STESSO valore non hanno un ordine tra loro: vengono rifiutate tutte
+        insieme, e tra un gruppo e il successivo la curva e' una retta (e'
+        quello che succederebbe in media rifiutandole in ordine casuale).
+        Molto importante per il density ratio, che ha moltissimi valori uguali.
+
+    ESEMPIO
+        rifiutate   0      1      2      3      4      5
+        quota r     0.0    0.2    0.4    0.6    0.8    1.0
+        rifiutata   -      0.2 S  0.4 G  0.6 S  0.8 G  0.9 G
+        errore      0.40   0.20   0.20   0.00   0.00   0.00
+
+    INPUT       : scores (piu' alto = piu' affidabile), correct (True/False), stessa lunghezza
+    RESTITUISCE : (r, errore), due array: i punti della curva, da r = 0 a r = 1
+    CHIAMATA DA : prr, scripts/eval_srr.py, tests/test_reliability_metrics.py
+    """
+    s = _as_array(scores)
+    c = np.asarray(correct, dtype=bool).ravel()
+    if c.size != s.size:
+        raise ValueError("scores e correct devono avere la stessa lunghezza")
+    n = s.size
+    values, group = np.unique(s, return_inverse=True)            # valori distinti, dal piu' piccolo
+    size = np.bincount(group, minlength=values.size)              # quante risposte per valore
+    wrong = np.bincount(group, weights=~c, minlength=values.size)  # quante sbagliate per valore
+    rejected = np.concatenate([[0], np.cumsum(size)])             # rifiutate dopo ogni gruppo
+    wrong_left = c.size - c.sum() - np.concatenate([[0], np.cumsum(wrong)])
+    return rejected / n, wrong_left / n
+
+
+def prr(scores, correct) -> float:
+    """PRR (Prediction Rejection Ratio): la curva errore-rifiuto riassunta in un numero.
+
+    TEORIA
+        Si confronta l'area sotto la curva del criterio con due riferimenti
+        (e0 = quota di risposte sbagliate):
+            a caso   : rifiutando a caso l'errore cala in linea retta, area = e0 / 2
+            oracolo  : rifiuta prima tutte le sbagliate, area = e0^2 / 2
+        PRR = (area a caso - area criterio) / (area a caso - area oracolo)
+        1 = criterio perfetto, 0 = non meglio del caso (negativo = peggio del caso).
+
+    ESEMPIO (curva di error_reject_curve, e0 = 0.4, punti ogni 0.2)
+        area criterio = 0.2 * [(0.40+0.20)/2 + (0.20+0.20)/2 + (0.20+0.00)/2] = 0.12
+        area a caso   = 0.40 / 2   = 0.20
+        area oracolo  = 0.40^2 / 2 = 0.08
+        PRR = (0.20 - 0.12) / (0.20 - 0.08) = 0.08 / 0.12 = 0.67
+
+    INPUT       : come error_reject_curve
+    RESTITUISCE : float; nan se le risposte sono tutte giuste o tutte sbagliate
+                  (non c'e' niente da separare)
+    CHIAMA      : error_reject_curve (l'area si calcola con i trapezi)
+    CHIAMATA DA : scripts/eval_srr.py, tests/test_reliability_metrics.py
+    """
+    r, err = error_reject_curve(scores, correct)
+    e0 = err[0]
+    if e0 == 0 or e0 == 1:
+        return float("nan")
+    area = float(np.sum((err[1:] + err[:-1]) / 2 * np.diff(r)))   # trapezi
+    area_random, area_oracle = e0 / 2, e0 ** 2 / 2
+    return float((area_random - area) / (area_random - area_oracle))
+
+
+def auroc(scores_correct, scores_wrong) -> float:
+    """AUROC: probabilita' che una risposta giusta abbia un valore piu' alto di una sbagliata.
+
+    TEORIA
+        Si prendono tutte le coppie (giusta, sbagliata) e si conta in quante il
+        criterio da' il valore piu' alto alla giusta; i pareggi contano 1/2.
+        1 = separa perfettamente, 0.5 = come tirare a caso. E' l'area sotto la
+        curva ROC del criterio (da cui il nome), ma si calcola cosi' senza soglie.
+
+    COME LO CALCOLA IL CODICE
+        Ordina le sbagliate; per ogni giusta, np.searchsorted conta in un colpo
+        quante sbagliate sono strettamente sotto (side="left") e quante sono
+        uguali (differenza tra side="right" e side="left").
+
+    ESEMPIO
+        giuste {0.9, 0.8, 0.4}, sbagliate {0.6, 0.2}: 6 coppie
+        0.9 > 0.6 si'   0.9 > 0.2 si'
+        0.8 > 0.6 si'   0.8 > 0.2 si'
+        0.4 > 0.6 no    0.4 > 0.2 si'       AUROC = 5/6 = 0.83
+
+    INPUT       : due liste di valori del criterio (giuste e sbagliate), non vuote
+    RESTITUISCE : float in [0, 1]
+    CHIAMATA DA : scripts/eval_srr.py, tests/test_reliability_metrics.py
+    """
+    pos = _as_array(scores_correct)
+    neg = np.sort(_as_array(scores_wrong))
+    below = np.searchsorted(neg, pos, side="left")
+    ties = np.searchsorted(neg, pos, side="right") - below
+    return float(np.mean((below + 0.5 * ties) / neg.size))

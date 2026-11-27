@@ -11,7 +11,7 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR e margine fatti; PRR, Weibull, qualità da fare |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, PRR/AUROC fatti; Weibull e qualità da fare |
 | 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
@@ -41,7 +41,7 @@ Al primo utilizzo insightface scarica automaticamente il pacchetto di modelli `b
 uv run pytest -v
 ```
 
-Devono passare tutti i 61 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
+Devono passare tutti i 67 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
 
 | File di test | Cosa controlla |
 |---|---|
@@ -50,7 +50,8 @@ Devono passare tutti i 61 test. I test sul modello scaricano `buffalo_l` se non 
 | `tests/test_lbp.py` | codici LBP calcolati a mano, pattern uniformi, istogrammi a griglia, distanza chi-quadro |
 | `tests/test_srr.py` | relative distance, density ratio, valore critico e SRR sugli esempi a mano degli appunti e della guida |
 | `tests/test_margin.py` | margine top-1/top-2 (casi A e B della guida), una distanza per persona, distanza dalla soglia |
-| `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori |
+| `tests/test_reliability_metrics.py` | curva errore contro rifiuto, PRR e AUROC sugli esempi a mano, pareggi |
+| `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori, PRR e AUROC per tipo di errore |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
 | `tests/test_metrics.py` | FAR, FRR, ROC, EER, d′, CMS, DIR, calcolati su esempi piccoli verificabili a mano |
 | `tests/test_lfw_tools.py` | manifest, lettura di `pairs.txt`, divisione gallery/probe, matrice delle distanze, cache degli embedding, su un mini LFW finto |
@@ -154,7 +155,20 @@ Risultati sulla metà di test (27 novembre 2026), regola "affidabile se criterio
 | LBP: risposte sbagliate lasciate passare | 30,5 % | 38,5 % | 30,0 % | 36,2 % |
 | LBP: step-up su risposte giuste | 31,1 % | 35,8 % | 31,8 % | 34,4 % |
 
-Ogni colonna è un solo punto di lavoro; il confronto tra criteri a tutte le soglie (PRR, curve errore contro rifiuto, AUROC) è il passo successivo.
+Ogni colonna è un solo punto di lavoro. Il confronto a **tutte le soglie** usa le funzioni di `eval/metrics.py`: la curva errore contro rifiuto (quanti errori restano se si mandano allo step-up le risposte meno affidabili), il **PRR** che la riassume (1 = perfetto, 0 = come il caso) e l'**AUROC** (probabilità che una risposta giusta abbia un valore più alto di una sbagliata), calcolato anche per tipo di errore: scambio di persona e sconosciuto.
+
+| | PRR | AUROC | AUROC scambi | AUROC sconosciuti |
+|---|---|---|---|---|
+| ArcFace SRR relative | 0,997 | 0,9986 | 0,90 | 0,9990 |
+| ArcFace SRR density | 0,991 | 0,9954 | 0,91 | 0,9958 |
+| ArcFace margine | 0,997 | 0,9986 | 0,91 | 0,9990 |
+| ArcFace distanza dalla soglia | 0,997 | 0,9985 | 0,90 | 0,9990 |
+| LBP SRR relative | 0,532 | 0,766 | 0,77 | 0,77 |
+| LBP SRR density | 0,364 | 0,682 | 0,68 | 0,69 |
+| LBP margine | 0,528 | 0,764 | 0,76 | 0,77 |
+| LBP distanza dalla soglia | 0,404 | 0,702 | 0,69 | 0,72 |
+
+Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test gli scambi di persona sono solo 9, quindi il loro AUROC è poco stabile). Con LBP la relative distance e il margine sono pari e nettamente migliori del density ratio e della distanza dalla soglia.
 
 Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
 
@@ -192,7 +206,7 @@ SecondLook/
     face/lbp.py           LBP a griglia (uniformi, 7 x 7) e distanza chi-quadro
     eval/datasets.py      manifest nel formato comune, download di LFW, coppie di pairs.txt, divisione gallery/probe
     eval/matrices.py      cache degli embedding (.npz) e matrice delle distanze probe x gallery
-    eval/metrics.py       FAR, FRR, ROC, DET, EER, d', CMS/CMC, DIR e false alarm open-set
+    eval/metrics.py       FAR, FRR, ROC, DET, EER, d', CMS/CMC, DIR e false alarm open-set; curva errore-rifiuto, PRR, AUROC
     reliability/srr.py    SRR: relative distance, density ratio, valore critico, normalizzazione
     reliability/margin.py margine top-1/top-2 e distanza dalla soglia
     reliability/          altri stimatori: Weibull (da fare)
@@ -202,10 +216,10 @@ SecondLook/
   scripts/
     compare_faces.py      distanza tra due foto
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
-    eval_srr.py           valutazione di SRR e margine su LFW (valore critico sul tuning, errori sul test)
+    eval_srr.py           valutazione di SRR e margine su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (61 test)
+  tests/                  test con pytest (67 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 

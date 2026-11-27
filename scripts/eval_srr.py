@@ -1,4 +1,4 @@
-"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2 e 5.3).
+"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2, 5.3 e 5.4).
 
 Domanda: l'SRR riesce a capire quando la risposta del primo stadio (identificazione
 open-set contro tutta la gallery) e' sbagliata? E come se la cavano i criteri piu'
@@ -18,9 +18,13 @@ Cosa fa:
         threshold   distanza dalla soglia, t - d1 (si usa -d1: stesso ordine dei probe)
   4. divide le PERSONE a meta': sulla meta' "tuning" stima il valore critico di
      ogni criterio, sulla meta' "test" misura gli errori con quel valore fisso
-     ATTENZIONE: un solo punto per criterio. Il confronto giusto tra criteri, a
-     tutte le soglie, si fa con PRR e curve errore-rifiuto (passo 5.4).
-  5. stampa e salva i risultati in data/lfw/results_srr_<metodo>.json
+     ATTENZIONE: un solo punto per criterio, utile ma non per dire chi vince.
+  5. confronta i criteri a TUTTE le soglie sulla meta' test (passo 5.4):
+     PRR (dalla curva errore contro rifiuto) e AUROC, sia su tutte le risposte
+     sbagliate sia per tipo di errore: scambio di persona (registrato
+     riconosciuto come un altro) e sconosciuto (non registrato a cui si da' un nome)
+  6. stampa e salva i risultati (con i punti delle curve, per i grafici)
+     in data/lfw/results_srr_<metodo>.json
 
 Uso (dalla cartella SecondLook), dopo aver gia' eseguito eval_lfw.py con lo stesso metodo:
     uv run python scripts/eval_srr.py                 # ArcFace
@@ -37,7 +41,7 @@ import numpy as np
 from eval_lfw import distance_matrix      # stesso script-folder: coseno (arcface) o chi-quadro (lbp)
 from secondlook.eval.datasets import lfw_manifest, split_gallery_probes
 from secondlook.eval.matrices import EmbeddingCache
-from secondlook.eval.metrics import _per_identity, _true_rank_and_distance
+from secondlook.eval.metrics import _per_identity, _true_rank_and_distance, auroc, error_reject_curve, prr
 from secondlook.reliability.margin import margin_top2, top_two
 from secondlook.reliability.srr import KINDS, critical_phi, phi_matrix, srr
 
@@ -124,6 +128,51 @@ def evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning,
     return out
 
 
+def threshold_free(phi_known, correct, known_tuning, phi_unknown, unknown_tuning, points: int = 101) -> dict:
+    """PRR, AUROC e curva errore-rifiuto di UN criterio, sulla meta' test, senza soglie.
+
+    TEORIA
+        evaluate_kind guarda il criterio a un solo punto (il suo valore critico).
+        Qui lo si guarda a TUTTE le soglie, cosi' i criteri si confrontano alla
+        pari. Gli errori della meta' test sono di due tipi:
+            scambio      = registrato, ma il primo candidato e' un altro
+            sconosciuto  = non registrato, qualunque nome gli si dia e' sbagliato
+        Si calcola l'AUROC giuste contro sbagliate di ogni tipo e di tutte insieme.
+
+    COME LO CALCOLA IL CODICE
+        test = probe delle persone NON di tuning; risposte = registrati + sconosciuti
+        prr(valori, giusta?) e auroc(giuste, sbagliate) da eval/metrics.py
+        la curva si salva su `points` quote di rifiuto equidistanti (0, 0.01, ..., 1),
+        con np.interp, per poterla disegnare senza salvare migliaia di punti
+
+    ESEMPIO (numeri piccoli)
+        test: giuste [0.9, 0.8, 0.4], scambi [0.6], sconosciuti [0.2]
+        prr = 0.67   auroc_all = 5/6   auroc_swap = 2/3   auroc_unknown = 1.0
+
+    INPUT       : come evaluate_kind; points = punti della curva salvata
+    RESTITUISCE : dizionario con prr, auroc_all, auroc_swap, auroc_unknown, n_swap,
+                  n_unknown e la curva (reject, error)
+    CHIAMA      : prr, auroc, error_reject_curve
+    CHIAMATA DA : main, tests/test_eval_srr.py
+    """
+    t_known, t_correct = phi_known[~known_tuning], correct[~known_tuning]
+    t_unknown = phi_unknown[~unknown_tuning]
+    good, swap = t_known[t_correct], t_known[~t_correct]
+    scores = np.concatenate([t_known, t_unknown])
+    is_correct = np.concatenate([t_correct, np.zeros(t_unknown.size, dtype=bool)])
+    r, err = error_reject_curve(scores, is_correct)
+    grid = np.linspace(0, 1, points)
+    return {
+        "prr": prr(scores, is_correct),
+        "auroc_all": auroc(good, np.concatenate([swap, t_unknown])),
+        "auroc_swap": auroc(good, swap) if swap.size else float("nan"),
+        "auroc_unknown": auroc(good, t_unknown) if t_unknown.size else float("nan"),
+        "n_swap": int(swap.size),
+        "n_unknown": int(t_unknown.size),
+        "curve": {"reject": grid.tolist(), "error": np.interp(grid, r, err).tolist()},
+    }
+
+
 def criteria_scores(dist, gallery_ids) -> dict:
     """I quattro criteri di affidabilita' per ogni riga di una matrice probe x template.
 
@@ -157,7 +206,8 @@ def main() -> None:
         2. matrici:   distance_matrix (da eval_lfw.py) per registrati e sconosciuti
         3. etichette: _per_identity, _true_rank_and_distance -> giusta se rango 1
         4. divisione: split_subjects (meta' tuning, meta' test, per persona)
-        5. per ogni criterio: criteria_scores, evaluate_kind
+        5. per ogni criterio: criteria_scores, evaluate_kind (un punto),
+           threshold_free (PRR, AUROC, curva)
         6. stampa e salva results_srr_<metodo>.json
 
     CHIAMATA DA : riga di comando
@@ -205,6 +255,7 @@ def main() -> None:
     for c in CRITERIA:
         results[c] = evaluate_kind(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning,
                                    normalize=c in KINDS)
+        results[c].update(threshold_free(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning))
     # per la distanza dalla soglia si riporta la soglia vera t = -valore critico
     results["threshold"]["acceptance_threshold"] = -results["threshold"]["critical"]
 
@@ -222,6 +273,13 @@ def main() -> None:
         print(f"tasso di step-up         {r['step_up_rate'] * 100:6.2f} %   (su tutti i login del test)")
         if "srr_median_correct" in r:
             print(f"SRR mediano: giuste {r['srr_median_correct']:+.2f}   sbagliate {r['srr_median_wrong']:+.2f}")
+    print("\n=== a tutte le soglie (meta' test) ===")
+    print(f"{'criterio':38s} {'PRR':>6s} {'AUROC':>7s} {'scambi':>8s} {'sconosc.':>9s}")
+    for c in CRITERIA:
+        r = results[c]
+        print(f"{names[c]:38s} {r['prr']:6.3f} {r['auroc_all']:7.4f} {r['auroc_swap']:8.4f} {r['auroc_unknown']:9.4f}")
+    r0 = results[CRITERIA[0]]
+    print(f"(nel test: {r0['n_swap']} scambi di persona, {r0['n_unknown']} sconosciuti)")
     out = root / f"results_srr_{method}.json"
     out.write_text(json.dumps(results, indent=2))
     print(f"\nrisultati salvati in {out}")
