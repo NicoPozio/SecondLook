@@ -40,6 +40,7 @@ def test_criteria_scores_case_b():
     assert sc["density"][0] == 0.5
     assert sc["margin"][0] == pytest.approx(0.02)
     assert sc["threshold"][0] == pytest.approx(-0.30)
+    assert sc["weibull"][0] == pytest.approx(0.92, abs=0.05)
 
 
 def test_margin_has_no_srr_medians():

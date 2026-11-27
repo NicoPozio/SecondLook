@@ -11,7 +11,7 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, PRR/AUROC fatti; Weibull e qualità da fare |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, Weibull, PRR/AUROC fatti; indici di qualità da fare |
 | 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
@@ -41,7 +41,7 @@ Al primo utilizzo insightface scarica automaticamente il pacchetto di modelli `b
 uv run pytest -v
 ```
 
-Devono passare tutti i 67 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
+Devono passare tutti i 72 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
 
 | File di test | Cosa controlla |
 |---|---|
@@ -50,6 +50,7 @@ Devono passare tutti i 67 test. I test sul modello scaricano `buffalo_l` se non 
 | `tests/test_lbp.py` | codici LBP calcolati a mano, pattern uniformi, istogrammi a griglia, distanza chi-quadro |
 | `tests/test_srr.py` | relative distance, density ratio, valore critico e SRR sugli esempi a mano degli appunti e della guida |
 | `tests/test_margin.py` | margine top-1/top-2 (casi A e B della guida), una distanza per persona, distanza dalla soglia |
+| `tests/test_metarecognition.py` | meta-recognition di Weibull: casi A e B, uso della sola coda, una distanza per persona |
 | `tests/test_reliability_metrics.py` | curva errore contro rifiuto, PRR e AUROC sugli esempi a mano, pareggi |
 | `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori, PRR e AUROC per tipo di errore |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
@@ -128,7 +129,7 @@ Le due colonne usano le stesse foto, gli stessi volti rilevati (18 foto su 13.23
 
 L'accuratezza di ArcFace coincide con quella dichiarata da insightface per lo stesso modello (`buffalo_l`, 99,83 %). LBP è nettamente peggiore: su LFW le foto hanno pose, luci ed espressioni molto diverse, e le feature scelte a mano ne soffrono molto più di quelle apprese da una rete. EER, CMS e DIR non hanno un valore ufficiale di confronto su LFW: la divisione gallery/probe è nostra.
 
-## Affidabilità della risposta: SRR e margine su LFW
+## Affidabilità della risposta: SRR, margine e Weibull su LFW
 
 `src/secondlook/reliability/srr.py` calcola l'SRR (System Response Reliability) di una risposta dell'identificazione, a partire dalle distanze del probe da **ogni persona** della gallery (se una persona ha più template si tiene il più vicino):
 
@@ -137,6 +138,8 @@ L'accuratezza di ArcFace coincide con quella dichiarata da insightface per lo st
 - SRR = (φ − φ̄) / S, in [−1, 1]; nel login, SRR basso fa scattare lo step-up.
 
 `src/secondlook/reliability/margin.py` calcola i due concorrenti più semplici, che guardano solo i primi posti: il **margine top-1/top-2** d₂ − d₁ e la **distanza dalla soglia** t − d₁ (che ordina i probe come −d₁, qualunque sia t).
+
+`src/secondlook/reliability/metarecognition.py` calcola la **meta-recognition di Weibull** (Scheirer et al., 2011): adatta una Weibull (`scipy.stats.weibull_min`) alla coda delle 10 distanze dopo il primo, cioè ai candidati sbagliati, e misura quanto è improbabile d₁ secondo quella distribuzione, con il punteggio −log₁₀ P(non-corrispondente ≤ d₁).
 
 ```bash
 uv run python scripts/eval_srr.py                 # ArcFace (serve la cache di eval_lfw.py)
@@ -163,12 +166,14 @@ Ogni colonna è un solo punto di lavoro. Il confronto a **tutte le soglie** usa 
 | ArcFace SRR density | 0,991 | 0,9954 | 0,91 | 0,9958 |
 | ArcFace margine | 0,997 | 0,9986 | 0,91 | 0,9990 |
 | ArcFace distanza dalla soglia | 0,997 | 0,9985 | 0,90 | 0,9990 |
+| ArcFace Weibull | 0,996 | 0,9980 | 0,92 | 0,9983 |
 | LBP SRR relative | 0,532 | 0,766 | 0,77 | 0,77 |
 | LBP SRR density | 0,364 | 0,682 | 0,68 | 0,69 |
 | LBP margine | 0,528 | 0,764 | 0,76 | 0,77 |
 | LBP distanza dalla soglia | 0,404 | 0,702 | 0,69 | 0,72 |
+| LBP Weibull | 0,494 | 0,747 | 0,75 | 0,75 |
 
-Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test gli scambi di persona sono solo 9, quindi il loro AUROC è poco stabile). Con LBP la relative distance e il margine sono pari e nettamente migliori del density ratio e della distanza dalla soglia.
+Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test gli scambi di persona sono solo 9, quindi il loro AUROC è poco stabile). Con LBP la relative distance e il margine sono pari e i migliori; Weibull è subito dietro, il density ratio e la distanza dalla soglia sono nettamente peggiori.
 
 Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
 
@@ -209,17 +214,17 @@ SecondLook/
     eval/metrics.py       FAR, FRR, ROC, DET, EER, d', CMS/CMC, DIR e false alarm open-set; curva errore-rifiuto, PRR, AUROC
     reliability/srr.py    SRR: relative distance, density ratio, valore critico, normalizzazione
     reliability/margin.py margine top-1/top-2 e distanza dalla soglia
-    reliability/          altri stimatori: Weibull (da fare)
+    reliability/metarecognition.py  meta-recognition di Weibull sulla coda delle distanze
     keystroke/            feature di digitazione e matcher (da fare)
     fusion/               normalizzazione, step-up, aggiornamento template (da fare)
     app/                  app web di acquisizione e demo (da fare)
   scripts/
     compare_faces.py      distanza tra due foto
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
-    eval_srr.py           valutazione di SRR e margine su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
+    eval_srr.py           valutazione di SRR, margine e Weibull su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (67 test)
+  tests/                  test con pytest (72 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 

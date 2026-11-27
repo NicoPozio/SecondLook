@@ -1,4 +1,4 @@
-"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2, 5.3 e 5.4).
+"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2-5.5).
 
 Domanda: l'SRR riesce a capire quando la risposta del primo stadio (identificazione
 open-set contro tutta la gallery) e' sbagliata? E come se la cavano i criteri piu'
@@ -10,12 +10,14 @@ Cosa fa:
   2. etichetta ogni risposta: GIUSTA se il probe e' registrato e il primo candidato
      e' la sua persona; SBAGLIATA se il primo candidato e' un altro, oppure se il
      probe e' di uno sconosciuto (qualunque nome gli si dia e' sbagliato)
-  3. calcola per ogni probe i quattro criteri, senza usare le etichette, come
+  3. calcola per ogni probe i cinque criteri, senza usare le etichette, come
      farebbe il login dal vivo (per tutti: piu' alto = piu' affidabile):
         relative    phi della relative distance  (SRR)
         density     phi del density ratio        (SRR)
         margin      margine top-1/top-2, d2 - d1
         threshold   distanza dalla soglia, t - d1 (si usa -d1: stesso ordine dei probe)
+        weibull     meta-recognition: -log10 P(d1) secondo una Weibull adattata
+                    alla coda delle distanze dei candidati sbagliati
   4. divide le PERSONE a meta': sulla meta' "tuning" stima il valore critico di
      ogni criterio, sulla meta' "test" misura gli errori con quel valore fisso
      ATTENZIONE: un solo punto per criterio, utile ma non per dire chi vince.
@@ -43,10 +45,11 @@ from secondlook.eval.datasets import lfw_manifest, split_gallery_probes
 from secondlook.eval.matrices import EmbeddingCache
 from secondlook.eval.metrics import _per_identity, _true_rank_and_distance, auroc, error_reject_curve, prr
 from secondlook.reliability.margin import margin_top2, top_two
+from secondlook.reliability.metarecognition import weibull_scores
 from secondlook.reliability.srr import KINDS, critical_phi, phi_matrix, srr
 
 # i criteri valutati; per relative e density si riporta anche l'SRR
-CRITERIA = ("relative", "density", "margin", "threshold")
+CRITERIA = ("relative", "density", "margin", "threshold", "weibull")
 
 
 def split_subjects(subject_ids, seed: int = 0) -> set:
@@ -174,7 +177,7 @@ def threshold_free(phi_known, correct, known_tuning, phi_unknown, unknown_tuning
 
 
 def criteria_scores(dist, gallery_ids) -> dict:
-    """I quattro criteri di affidabilita' per ogni riga di una matrice probe x template.
+    """I cinque criteri di affidabilita' per ogni riga di una matrice probe x template.
 
     COME LO CALCOLA IL CODICE
         relative, density : phi_matrix (srr.py)
@@ -182,11 +185,12 @@ def criteria_scores(dist, gallery_ids) -> dict:
         threshold         : -d1. La distanza dalla soglia t - d1 ordina i probe
                             esattamente come -d1 per qualunque t, quindi il suo
                             valore critico c sul tuning equivale alla soglia t = -c
+        weibull           : weibull_scores (metarecognition.py), coda di 10 distanze
     ESEMPIO (una riga, caso B della guida: 0.30, 0.32, 0.35, 0.90, 0.95)
-        relative 0.02   density 0.50   margin 0.02   threshold -0.30
+        relative 0.02   density 0.50   margin 0.02   threshold -0.30   weibull 0.92
     INPUT       : dist = matrice (n_probe x n_template); gallery_ids = persona di ogni colonna
     RESTITUISCE : dizionario criterio -> array di n_probe valori (piu' alto = piu' affidabile)
-    CHIAMA      : phi_matrix, top_two, margin_top2
+    CHIAMA      : phi_matrix, top_two, margin_top2, weibull_scores
     CHIAMATA DA : main
     """
     d1, d2 = top_two(dist, gallery_ids)
@@ -195,6 +199,7 @@ def criteria_scores(dist, gallery_ids) -> dict:
         "density": phi_matrix(dist, gallery_ids, "density"),
         "margin": margin_top2(d1, d2),
         "threshold": -d1,
+        "weibull": weibull_scores(dist, gallery_ids),
     }
 
 
@@ -262,7 +267,8 @@ def main() -> None:
     # --- 6. stampa e salvataggio ---------------------------------------------
     print(f"risposte giuste (rango 1) tra i registrati: {results['rank1_correct'] * 100:.2f} %")
     names = {"relative": "SRR relative distance (phi_bar)", "density": "SRR density ratio (phi_bar)",
-             "margin": "margine top-1/top-2", "threshold": "distanza dalla soglia (soglia t)"}
+             "margin": "margine top-1/top-2", "threshold": "distanza dalla soglia (soglia t)",
+             "weibull": "meta-recognition di Weibull"}
     for c in CRITERIA:
         r = results[c]
         crit = r.get("acceptance_threshold", r["critical"])
