@@ -1,4 +1,4 @@
-"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2-5.5).
+"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2-5.6).
 
 Domanda: l'SRR riesce a capire quando la risposta del primo stadio (identificazione
 open-set contro tutta la gallery) e' sbagliata? E come se la cavano i criteri piu'
@@ -18,6 +18,9 @@ Cosa fa:
         threshold   distanza dalla soglia, t - d1 (si usa -d1: stesso ordine dei probe)
         weibull     meta-recognition: -log10 P(d1) secondo una Weibull adattata
                     alla coda delle distanze dei candidati sbagliati
+     e, se esiste la cache data/lfw/quality_center.npz, i tre indici di QUALITA'
+     della foto (calcolati prima del confronto, uguali per ArcFace e LBP):
+        sp  posa,  si  illuminazione,  sy  simmetria   (face/quality.py)
   4. divide le PERSONE a meta': sulla meta' "tuning" stima il valore critico di
      ogni criterio, sulla meta' "test" misura gli errori con quel valore fisso
      ATTENZIONE: un solo punto per criterio, utile ma non per dire chi vince.
@@ -46,10 +49,12 @@ from secondlook.eval.matrices import EmbeddingCache
 from secondlook.eval.metrics import _per_identity, _true_rank_and_distance, auroc, error_reject_curve, prr
 from secondlook.reliability.margin import margin_top2, top_two
 from secondlook.reliability.metarecognition import weibull_scores
+from secondlook.face.quality import pitch_norm, score_pose
 from secondlook.reliability.srr import KINDS, critical_phi, phi_matrix, srr
 
 # i criteri valutati; per relative e density si riporta anche l'SRR
 CRITERIA = ("relative", "density", "margin", "threshold", "weibull")
+QUALITY = ("sp", "si", "sy")       # indici di qualita' della foto (se c'e' la loro cache)
 
 
 def split_subjects(subject_ids, seed: int = 0) -> set:
@@ -176,6 +181,33 @@ def threshold_free(phi_known, correct, known_tuning, phi_unknown, unknown_tuning
     }
 
 
+def quality_scores(q_known, q_unknown, known_tuning, unknown_tuning):
+    """SP, SI e SY di ogni probe dalle misure salvate in cache.
+
+    COME LO CALCOLA IL CODICE
+        la cache ha, per ogni foto, [roll, yaw, r, SI, SY] (face/quality.quality_measures).
+        Per SP serve il valore "frontale" r0 del rapporto occhi-naso / naso-mento:
+        si stima come MEDIANA di r sulle foto delle persone di tuning (registrati
+        e sconosciuti), poi pitch = pitch_norm(r, r0) e SP = score_pose(roll, yaw, pitch).
+        SI e SY sono gia' pronti.
+
+    ESEMPIO : r0 = 0.44; foto con roll 0, yaw 0.05, r 0.44 -> pitch 0 -> SP = 0.983
+
+    INPUT       : q_known, q_unknown = matrici (n x 5) dalla cache, nell'ordine dei probe;
+                  known_tuning, unknown_tuning = True per le persone di tuning
+    RESTITUISCE : (punteggi dei registrati, punteggi degli sconosciuti, r0);
+                  i punteggi sono dizionari "sp"/"si"/"sy" -> array
+    CHIAMA      : pitch_norm, score_pose
+    CHIAMATA DA : main, tests/test_eval_srr.py
+    """
+    r0 = float(np.median(np.concatenate([q_known[known_tuning, 2], q_unknown[unknown_tuning, 2]])))
+
+    def scores(q):
+        return {"sp": score_pose(q[:, 0], q[:, 1], pitch_norm(q[:, 2], r0)), "si": q[:, 3], "sy": q[:, 4]}
+
+    return scores(q_known), scores(q_unknown), r0
+
+
 def criteria_scores(dist, gallery_ids) -> dict:
     """I cinque criteri di affidabilita' per ogni riga di una matrice probe x template.
 
@@ -212,7 +244,8 @@ def main() -> None:
         3. etichette: _per_identity, _true_rank_and_distance -> giusta se rango 1
         4. divisione: split_subjects (meta' tuning, meta' test, per persona)
         5. per ogni criterio: criteria_scores, evaluate_kind (un punto),
-           threshold_free (PRR, AUROC, curva)
+           threshold_free (PRR, AUROC, curva); se c'e' la cache della qualita',
+           anche quality_scores -> SP, SI, SY
         6. stampa e salva results_srr_<metodo>.json
 
     CHIAMATA DA : riga di comando
@@ -257,7 +290,18 @@ def main() -> None:
     results = {"method": method, "known_probes": len(known), "unknown_probes": len(unknown),
                "rank1_correct": float(correct.mean()), "tuning_subjects": len(tuning)}
     s_known, s_unknown = criteria_scores(D_known, g_ids), criteria_scores(D_unknown, g_ids)
-    for c in CRITERIA:
+    criteria = list(CRITERIA)
+    q_cache = EmbeddingCache(root / "quality_center.npz")
+    k_samples, u_samples = [r["sample_id"] for r in known], [r["sample_id"] for r in unknown]
+    if all(sid in q_cache.vectors for sid in k_samples + u_samples):
+        qk, qu, r0 = quality_scores(q_cache.get(k_samples), q_cache.get(u_samples), known_tuning, unknown_tuning)
+        s_known.update(qk)
+        s_unknown.update(qu)
+        criteria += list(QUALITY)
+        results["quality_r0"] = r0
+    else:
+        print("cache della qualita' assente o incompleta: SP, SI, SY non valutati")
+    for c in criteria:
         results[c] = evaluate_kind(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning,
                                    normalize=c in KINDS)
         results[c].update(threshold_free(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning))
@@ -268,8 +312,9 @@ def main() -> None:
     print(f"risposte giuste (rango 1) tra i registrati: {results['rank1_correct'] * 100:.2f} %")
     names = {"relative": "SRR relative distance (phi_bar)", "density": "SRR density ratio (phi_bar)",
              "margin": "margine top-1/top-2", "threshold": "distanza dalla soglia (soglia t)",
-             "weibull": "meta-recognition di Weibull"}
-    for c in CRITERIA:
+             "weibull": "meta-recognition di Weibull", "sp": "qualita': posa (SP)",
+             "si": "qualita': illuminazione (SI)", "sy": "qualita': simmetria (SY)"}
+    for c in criteria:
         r = results[c]
         crit = r.get("acceptance_threshold", r["critical"])
         print(f"\n=== {names[c]} === valore critico {crit:.4f} (stimato sul tuning)")
@@ -281,7 +326,7 @@ def main() -> None:
             print(f"SRR mediano: giuste {r['srr_median_correct']:+.2f}   sbagliate {r['srr_median_wrong']:+.2f}")
     print("\n=== a tutte le soglie (meta' test) ===")
     print(f"{'criterio':38s} {'PRR':>6s} {'AUROC':>7s} {'scambi':>8s} {'sconosc.':>9s}")
-    for c in CRITERIA:
+    for c in criteria:
         r = results[c]
         print(f"{names[c]:38s} {r['prr']:6.3f} {r['auroc_all']:7.4f} {r['auroc_swap']:8.4f} {r['auroc_unknown']:9.4f}")
     r0 = results[CRITERIA[0]]

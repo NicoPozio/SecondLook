@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from eval_srr import criteria_scores, evaluate_kind, split_subjects, threshold_free  # noqa: E402
+from eval_srr import criteria_scores, evaluate_kind, quality_scores, split_subjects, threshold_free  # noqa: E402
 
 
 def test_split_is_half_by_person_and_repeatable():
@@ -62,3 +62,14 @@ def test_threshold_free_by_hand():
     assert r["auroc_unknown"] == 1.0
     assert (r["n_swap"], r["n_unknown"]) == (1, 1)
     assert r["curve"]["error"][0] == pytest.approx(0.4) and r["curve"]["error"][-1] == 0.0
+
+
+def test_quality_scores_r0_from_tuning():
+    # [roll, yaw, r, SI, SY]; r0 = mediana di r sul tuning = mediana(0.40, 0.44, 0.48) = 0.44
+    q_known = np.array([[0, 0.05, 0.40, 0.9, 0.95], [0, 0.05, 0.44, 0.8, 0.90], [0, 0.05, 0.44, 0.7, 0.80]])
+    q_unknown = np.array([[0, 0.05, 0.48, 0.6, 0.70]])
+    known_tuning = np.array([True, True, False])
+    qk, qu, r0 = quality_scores(q_known, q_unknown, known_tuning, np.array([True]))
+    assert r0 == pytest.approx(0.44)
+    assert qk["sp"][2] == pytest.approx((1 + 0.95 + 1) / 3)       # pitch 0 -> SP = 0.983
+    assert np.allclose(qk["si"], [0.9, 0.8, 0.7]) and np.allclose(qu["sy"], [0.70])

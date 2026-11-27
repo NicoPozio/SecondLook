@@ -173,13 +173,14 @@ class FaceEmbedder:
         faces(img)  -> TUTTI i volti, ognuno con il suo embedding
         embed(img)  -> UN solo volto scelto, embedding solo di quello (piu' veloce)
         crop(img)   -> UN solo volto scelto, ritaglio allineato 112 x 112 (per LBP)
+        quality_inputs(img) -> ritaglio + 5 punti + 106 punti (per gli indici di qualita')
 
     CHIAMA       : insightface.app.FaceAnalysis (costruttore)
     CREATO DA    : scripts/eval_lfw.py, scripts/compare_faces.py, i test
     """
 
-    def __init__(self, model_pack: str = "buffalo_l", det_size: int = 640):
-        """Carica detector (SCRFD) e riconoscitore (ArcFace).
+    def __init__(self, model_pack: str = "buffalo_l", det_size: int = 640, landmarks: bool = False):
+        """Carica detector (SCRFD) e riconoscitore (ArcFace), e se richiesto il modello a 106 punti.
 
         PARAMETRI
             model_pack : nome del pacchetto di modelli insightface ("buffalo_l").
@@ -189,6 +190,10 @@ class FaceEmbedder:
                          di nero fino a 640 x 640. I riquadri trovati vengono
                          poi riportati alle coordinate della foto originale.
                          Piu' grande = trova volti piu' piccoli ma e' piu' lento.
+            landmarks  : True = carica anche 2d106det.onnx (106 punti del volto,
+                         stesso pacchetto buffalo_l), che serve solo agli indici
+                         di qualita' (quality_inputs). Default False: non cambia nulla
+                         per chi usa embed o crop.
 
         CHIAMA : FaceAnalysis(...), FaceAnalysis.prepare(...)
         """
@@ -196,7 +201,8 @@ class FaceEmbedder:
 
         self._app = FaceAnalysis(
             name=model_pack,
-            allowed_modules=["detection", "recognition"],  # solo SCRFD e ArcFace (niente eta'/genere)
+            # SCRFD e ArcFace (niente eta'/genere); i 106 punti solo se richiesti
+            allowed_modules=["detection", "recognition"] + (["landmark_2d_106"] if landmarks else []),
             providers=["CPUExecutionProvider"],            # onnxruntime su CPU, niente GPU
         )
         # ctx_id=-1 = CPU; det_size = dimensione dell'input del detector (vedi sopra)
@@ -404,6 +410,40 @@ class FaceEmbedder:
         _, kpss, k, _ = self._detect_and_choose(img, select)
         size = self._app.models["recognition"].input_size[0]   # 112, la stessa che usa ArcFace
         return norm_crop(img, landmark=kpss[k], image_size=size)
+
+    def quality_inputs(self, img: np.ndarray, select: str = "largest"):
+        """Tutto quello che serve agli indici di qualita' (face/quality.py) per il volto scelto.
+
+        TEORIA
+            Gli indici di qualita' (SP, SI, SY) si calcolano PRIMA del confronto,
+            sulla foto. Lo stesso volto deve essere quello usato da ArcFace e LBP,
+            quindi rilevamento e scelta del volto sono di nuovo _detect_and_choose.
+
+        COME LO CALCOLA IL CODICE
+            1. _detect_and_choose -> 5 punti del volto scelto
+            2. il modello a 106 punti (2d106det) sul riquadro del volto scelto
+            3. il ritaglio allineato 112 x 112, identico a crop()
+
+        ESEMPIO : t1.jpg, select="center" -> crop (112, 112, 3), kps5 (5, 2), lm106 (106, 2)
+
+        INPUT       : come embed; l'oggetto va creato con landmarks=True
+        RESTITUISCE : (crop, kps5, lm106) - ritaglio BGR allineato, 5 punti e 106 punti
+                      nelle coordinate della foto ORIGINALE
+        SOLLEVA     : ValueError se manca il modello a 106 punti o non c'e' nessun volto
+        CHIAMA      : _detect_and_choose, insightface Face, models["landmark_2d_106"].get, norm_crop
+        CHIAMATA DA : eval/matrices.embed_rows (method="quality"), tests/test_quality.py
+        """
+        from insightface.app.common import Face
+        from insightface.utils.face_align import norm_crop
+
+        if "landmark_2d_106" not in self._app.models:
+            raise ValueError("crea FaceEmbedder(landmarks=True) per usare quality_inputs")
+        bboxes, kpss, k, _ = self._detect_and_choose(img, select)
+        face = Face(bbox=bboxes[k, :4], kps=kpss[k], det_score=bboxes[k, 4])
+        self._app.models["landmark_2d_106"].get(img, face)   # scrive face.landmark_2d_106
+        size = self._app.models["recognition"].input_size[0]
+        crop = norm_crop(img, landmark=kpss[k], image_size=size)
+        return crop, kpss[k].astype(np.float32), face.landmark_2d_106.astype(np.float32)
 
 
 def select_face(samples: list[FaceSample], image_shape, select: str = "largest") -> FaceSample:
