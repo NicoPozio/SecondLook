@@ -11,7 +11,7 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, Weibull, qualità (SP, SI, SY), PRR/AUROC, Viola-Jones fatti; restano i grafici |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | fatta (27 novembre): SRR, margine, Weibull, qualità (SP, SI, SY), PRR/AUROC, Viola-Jones, impostore con foto ottima; MagFace da decidere |
 | 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
@@ -54,6 +54,7 @@ Devono passare tutti i 79 test. I test sul modello scaricano `buffalo_l` se non 
 | `tests/test_metarecognition.py` | meta-recognition di Weibull: casi A e B, uso della sola coda, una distanza per persona |
 | `tests/test_reliability_metrics.py` | curva errore contro rifiuto, PRR e AUROC sugli esempi a mano, pareggi |
 | `tests/test_detect.py` | IoU e ritaglio quadrato a mano, detection rate, Viola-Jones sulla foto di gruppo, `embed_crop` uguale a `embed` (salta se OpenCV non ha Viola-Jones) |
+| `tests/test_hard_impostors.py` | soglie della "foto ottima" sul tuning e quota lasciata passare, su esempi a mano |
 | `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori, PRR e AUROC per tipo di errore |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
 | `tests/test_metrics.py` | FAR, FRR, ROC, EER, d′, CMS, DIR, calcolati su esempi piccoli verificabili a mano |
@@ -183,6 +184,22 @@ Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test 
 
 Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
 
+## Impostore molto simile, foto ottima
+
+`scripts/eval_hard_impostors.py` mostra sul caso più insidioso che una foto bella non garantisce una decisione affidabile. Usa gli stessi punteggi e la stessa divisione tuning/test di `eval_srr.py` (funzione `prepare`). Una foto è **ottima** se SP, SI e SY sono tutti nel quarto migliore (soglie stimate sul tuning); tra le risposte sbagliate del test con foto ottima si conta quante ne lascia passare ogni criterio, al suo valore critico.
+
+```bash
+uv run python scripts/eval_hard_impostors.py                 # ArcFace
+uv run python scripts/eval_hard_impostors.py --method lbp
+```
+
+| | sbagliate con foto ottima | lasciate passare dalla qualità | dalla sola soglia | dall'SRR (relative distance) | step-up inutili SRR (giuste, foto ottima) |
+|---|---|---|---|---|---|
+| ArcFace | 85 (tutti sconosciuti) | 100 % | 0 % | 0 % | 0,6 % |
+| LBP | 249 (85 sconosciuti, 164 scambi) | 100 % | 71,1 % | 24,5 % | 43,8 % |
+
+Un indice calcolato solo sulla foto non può sapere se la persona è registrata: davanti a una foto perfetta di un impostore dice sempre "affidabile". Con ArcFace l'SRR ferma tutti questi impostori, ma li fermerebbe anche la soglia (il più simile ha d₁ 0,664, sopra t = 0,61). Con LBP una foto ottima rende la distanza più piccola e l'impostore più pericoloso per la soglia; l'SRR ne ferma tre su quattro, al prezzo di molti step-up inutili.
+
 ## Viola-Jones contro SCRFD: quanto conta il detector
 
 `src/secondlook/face/detect.py` aggiunge **Viola-Jones** (cascata di Haar di OpenCV, `haarcascade_frontalface_default.xml`) per rispondere alla domanda della pipeline: la qualità del detector influenza il riconoscimento e l'affidabilità? Viola-Jones dà solo il riquadro, senza i 5 punti, quindi non si può allineare. Per separare l'effetto del detector da quello dell'allineamento si confrontano tre varianti, tutte con ArcFace: `arcface` (SCRFD con allineamento), `arcface_noalign` (riquadro SCRFD senza allineamento, il controllo) e `arcface_vj` (riquadro Viola-Jones senza allineamento). Le due varianti senza allineamento usano lo stesso ritaglio quadrato (`square_crop`, lato 1,2 · √area del riquadro, 112 × 112).
@@ -254,10 +271,11 @@ SecondLook/
     compare_faces.py      distanza tra due foto
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
     eval_detectors.py     Viola-Jones contro SCRFD: detection rate e cache delle varianti senza allineamento
+    eval_hard_impostors.py  caso "impostore molto simile, foto ottima": qualità contro SRR
     eval_srr.py           valutazione di SRR, margine, Weibull e qualità su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (84 test)
+  tests/                  test con pytest (86 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 
@@ -274,6 +292,7 @@ Tutto ciò che sta in `data/` è escluso da git:
 | cache dei vettori | `data/lfw/embeddings_arcface_center.npz`, `data/lfw/embeddings_lbp_center.npz` |
 | cache delle misure di qualità | `data/lfw/quality_center.npz` |
 | confronto tra detector | `data/lfw/detectors_center.npz`, `data/lfw/embeddings_arcface_noalign_center.npz`, `data/lfw/embeddings_arcface_vj_center.npz`, `data/lfw/results_detectors.json` |
+| impostori con foto ottima | `data/lfw/results_hard_impostors_<metodo>.json` |
 | file della cascata di Viola-Jones | `data/models/haarcascade_frontalface_default.xml` (scaricato da solo) |
 | risultati della valutazione | `data/lfw/results_arcface.json`, `data/lfw/results_lbp.json`, `data/lfw/results_srr_<metodo>.json` |
 | raccolte del gruppo (volto, keystroke, JSON dei timestamp) | sotto `data/` |

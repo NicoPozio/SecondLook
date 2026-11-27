@@ -235,29 +235,23 @@ def criteria_scores(dist, gallery_ids) -> dict:
     }
 
 
-def main() -> None:
-    """Esegue la valutazione dell'SRR per un metodo (arcface o lbp).
+def prepare(root: Path, method: str) -> dict:
+    """Carica dati, distanze e punteggi di tutti i criteri: i passi 1-5 di main, senza valutare.
 
-    PASSI (e funzioni usate)
-        1. dati:      lfw_manifest, split_gallery_probes, EmbeddingCache (solo lettura)
-        2. matrici:   distance_matrix (da eval_lfw.py) per registrati e sconosciuti
-        3. etichette: _per_identity, _true_rank_and_distance -> giusta se rango 1
-        4. divisione: split_subjects (meta' tuning, meta' test, per persona)
-        5. per ogni criterio: criteria_scores, evaluate_kind (un punto),
-           threshold_free (PRR, AUROC, curva); se c'e' la cache della qualita',
-           anche quality_scores -> SP, SI, SY
-        6. stampa e salva results_srr_<metodo>.json
+    Serve a main e agli script che analizzano gli stessi punteggi con la stessa
+    divisione tuning/test (scripts/eval_hard_impostors.py).
 
-    CHIAMATA DA : riga di comando
+    RESTITUISCE : dizionario con
+        results          conteggi gia' pronti (probe, rango 1 giusto, persone di tuning, r0)
+        criteria         nomi dei criteri disponibili (con la qualita' se c'e' la cache)
+        s_known, s_unknown   punteggio di ogni criterio per ogni probe (piu' alto = piu' affidabile)
+        correct          True dove il registrato ha la persona giusta al rango 1
+        known_tuning, unknown_tuning   True dove il probe e' del gruppo di tuning
+        known, unknown   righe del manifest dei probe
+        ids, red_known, red_unknown    persone della gallery e distanza da ognuna (una per persona)
+    CHIAMA      : le stesse funzioni di main (vedi PASSI)
+    CHIAMATA DA : main, scripts/eval_hard_impostors.py
     """
-    warnings.filterwarnings("ignore", message="`estimate` is deprecated", category=FutureWarning)
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", default="data/lfw", help="cartella di LFW (default: data/lfw)")
-    parser.add_argument("--method", choices=METHODS, default="arcface",
-                        help="arcface, lbp, arcface_noalign o arcface_vj (vedi eval_lfw.py)")
-    args = parser.parse_args()
-    root, method = Path(args.root), args.method
-
     # --- 1. dati: le stesse liste di eval_lfw.py -----------------------------
     cache_path = root / f"embeddings_{method}_center.npz"
     if not cache_path.exists():
@@ -279,6 +273,7 @@ def main() -> None:
 
     # --- 3. etichette: la risposta del primo stadio e' giusta? ---------------
     ids, reduced = _per_identity(D_known, g_ids)
+    _, reduced_u = _per_identity(D_unknown, g_ids)
     rank, _ = _true_rank_and_distance(reduced, ids, k_ids)
     correct = rank == 1                                   # per gli sconosciuti: sempre sbagliata
 
@@ -302,6 +297,38 @@ def main() -> None:
         results["quality_r0"] = r0
     else:
         print("cache della qualita' assente o incompleta: SP, SI, SY non valutati")
+    return {"results": results, "criteria": criteria, "s_known": s_known, "s_unknown": s_unknown,
+            "correct": correct, "known_tuning": known_tuning, "unknown_tuning": unknown_tuning,
+            "known": known, "unknown": unknown, "ids": ids, "red_known": reduced, "red_unknown": reduced_u}
+
+
+def main() -> None:
+    """Esegue la valutazione dell'SRR per un metodo (arcface o lbp).
+
+    PASSI (e funzioni usate; i passi 1-5 fino ai punteggi sono in prepare)
+        1. dati:      lfw_manifest, split_gallery_probes, EmbeddingCache (solo lettura)
+        2. matrici:   distance_matrix (da eval_lfw.py) per registrati e sconosciuti
+        3. etichette: _per_identity, _true_rank_and_distance -> giusta se rango 1
+        4. divisione: split_subjects (meta' tuning, meta' test, per persona)
+        5. per ogni criterio: criteria_scores, evaluate_kind (un punto),
+           threshold_free (PRR, AUROC, curva); se c'e' la cache della qualita',
+           anche quality_scores -> SP, SI, SY
+        6. stampa e salva results_srr_<metodo>.json
+
+    CHIAMATA DA : riga di comando
+    """
+    warnings.filterwarnings("ignore", message="`estimate` is deprecated", category=FutureWarning)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root", default="data/lfw", help="cartella di LFW (default: data/lfw)")
+    parser.add_argument("--method", choices=METHODS, default="arcface",
+                        help="arcface, lbp, arcface_noalign o arcface_vj (vedi eval_lfw.py)")
+    args = parser.parse_args()
+    root, method = Path(args.root), args.method
+
+    p = prepare(root, method)
+    results, criteria = p["results"], p["criteria"]
+    s_known, s_unknown, correct = p["s_known"], p["s_unknown"], p["correct"]
+    known_tuning, unknown_tuning = p["known_tuning"], p["unknown_tuning"]
     for c in criteria:
         results[c] = evaluate_kind(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning,
                                    normalize=c in KINDS)
