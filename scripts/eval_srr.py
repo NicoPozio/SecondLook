@@ -43,7 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
-from eval_lfw import distance_matrix      # stesso script-folder: coseno (arcface) o chi-quadro (lbp)
+from eval_lfw import METHODS, distance_matrix   # stessa cartella: coseno (arcface e varianti) o chi-quadro (lbp)
 from secondlook.eval.datasets import lfw_manifest, split_gallery_probes
 from secondlook.eval.matrices import EmbeddingCache
 from secondlook.eval.metrics import _per_identity, _true_rank_and_distance, auroc, error_reject_curve, prr
@@ -253,7 +253,8 @@ def main() -> None:
     warnings.filterwarnings("ignore", message="`estimate` is deprecated", category=FutureWarning)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default="data/lfw", help="cartella di LFW (default: data/lfw)")
-    parser.add_argument("--method", choices=["arcface", "lbp"], default="arcface")
+    parser.add_argument("--method", choices=METHODS, default="arcface",
+                        help="arcface, lbp, arcface_noalign o arcface_vj (vedi eval_lfw.py)")
     args = parser.parse_args()
     root, method = Path(args.root), args.method
 

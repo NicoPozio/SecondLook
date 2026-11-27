@@ -11,7 +11,7 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, Weibull, qualità (SP, SI, SY), PRR/AUROC fatti; restano Viola-Jones e i grafici |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR, margine, Weibull, qualità (SP, SI, SY), PRR/AUROC, Viola-Jones fatti; restano i grafici |
 | 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
@@ -53,6 +53,7 @@ Devono passare tutti i 79 test. I test sul modello scaricano `buffalo_l` se non 
 | `tests/test_quality.py` | indici di qualità SP, SI, SY su esempi a mano; stesso ritaglio di ArcFace e LBP |
 | `tests/test_metarecognition.py` | meta-recognition di Weibull: casi A e B, uso della sola coda, una distanza per persona |
 | `tests/test_reliability_metrics.py` | curva errore contro rifiuto, PRR e AUROC sugli esempi a mano, pareggi |
+| `tests/test_detect.py` | IoU e ritaglio quadrato a mano, detection rate, Viola-Jones sulla foto di gruppo, `embed_crop` uguale a `embed` (salta se OpenCV non ha Viola-Jones) |
 | `tests/test_eval_srr.py` | divisione delle persone tuning/test, i quattro criteri, conteggio degli errori, PRR e AUROC per tipo di errore |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
 | `tests/test_metrics.py` | FAR, FRR, ROC, EER, d′, CMS, DIR, calcolati su esempi piccoli verificabili a mano |
@@ -182,6 +183,30 @@ Con ArcFace i criteri sono quasi perfetti e praticamente pari (nella metà test 
 
 Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
 
+## Viola-Jones contro SCRFD: quanto conta il detector
+
+`src/secondlook/face/detect.py` aggiunge **Viola-Jones** (cascata di Haar di OpenCV, `haarcascade_frontalface_default.xml`) per rispondere alla domanda della pipeline: la qualità del detector influenza il riconoscimento e l'affidabilità? Viola-Jones dà solo il riquadro, senza i 5 punti, quindi non si può allineare. Per separare l'effetto del detector da quello dell'allineamento si confrontano tre varianti, tutte con ArcFace: `arcface` (SCRFD con allineamento), `arcface_noalign` (riquadro SCRFD senza allineamento, il controllo) e `arcface_vj` (riquadro Viola-Jones senza allineamento). Le due varianti senza allineamento usano lo stesso ritaglio quadrato (`square_crop`, lato 1,2 · √area del riquadro, 112 × 112).
+
+```bash
+uv run python scripts/eval_detectors.py                      # ~3 ore su CPU: riquadri, detection rate, cache
+uv run python scripts/eval_lfw.py --method arcface_vj        # poi come gli altri metodi (anche arcface_noalign)
+uv run python scripts/eval_srr.py --method arcface_vj
+```
+
+**OpenCV 5.** In OpenCV 5 `cv2.CascadeClassifier` è nel pacchetto `opencv-contrib-python` e il file `.xml` non è più incluso. `haar_cascade()` scarica il file da GitHub in `data/models/` e ne controlla l'md5. Per questo `pyproject.toml` fissa `opencv-python>=4.9,<5` (dal 27 novembre: OpenCV 4.14, che ha ancora `CascadeClassifier`). Con OpenCV 5 senza il pacchetto contrib i test di Viola-Jones vengono saltati.
+
+Detection rate su LFW (13.233 foto, riferimento = volto di SCRFD): SCRFD 99,86 %, Viola-Jones 99,27 %, di cui 98,53 % sullo stesso volto di SCRFD (IoU ≥ 0,5, IoU mediano 0,72). Viola-Jones perde soprattutto i volti girati.
+
+Risultati sulle **stesse 13.038 foto** (quelle in cui i due detector trovano lo stesso volto), PRR sulla metà test:
+
+| variante | accuratezza 10-fold | EER | RR | DIR @ FA 1 % | PRR relative | PRR margine | PRR soglia | PRR Weibull |
+|---|---|---|---|---|---|---|---|---|
+| SCRFD + allineamento | 99,85 % | 0,28 % | 99,79 % | 99,66 % | 0,994 | 0,994 | 0,993 | 0,993 |
+| SCRFD senza allineamento | 99,26 % | 0,62 % | 98,19 % | 95,29 % | 0,983 | 0,983 | 0,988 | 0,970 |
+| Viola-Jones senza allineamento | 99,55 % | 0,41 % | 99,40 % | 98,70 % | 0,991 | 0,991 | 0,993 | 0,988 |
+
+Conta soprattutto l'allineamento: senza, gli errori di identificazione sono circa 9 volte di più. A parità di ritaglio Viola-Jones va meglio di SCRFD, perché il suo riquadro tiene gli occhi più vicini e più stabili rispetto al template di ArcFace (scarto mediano 5,9 px contro 9,4 px). I criteri di affidabilità restano buoni in tutte e tre le varianti e seguono lo stesso ordine del riconoscimento.
+
 ## Test di precisione dei timestamp
 
 Il keystroke misura per quanto resta premuto ogni tasto e quanto passa tra un tasto e il successivo, cioè differenze di pochi millisecondi. I browser però arrotondano di proposito i tempi degli eventi, per motivi di sicurezza, e di quanto lo fanno dipende dal browser e dalle sue impostazioni. Prima di costruire l'app di acquisizione va quindi verificato che il browser scelto sia abbastanza preciso.
@@ -215,6 +240,7 @@ SecondLook/
     face/embed.py         rilevamento (SCRFD), scelta del volto, allineamento, embedding ArcFace e ritaglio per LBP
     face/lbp.py           LBP a griglia (uniformi, 7 x 7) e distanza chi-quadro
     face/quality.py       indici di qualità SP (posa), SI (illuminazione), SY (simmetria)
+    face/detect.py        Viola-Jones, IoU, ritaglio quadrato senza allineamento, confronto con SCRFD
     eval/datasets.py      manifest nel formato comune, download di LFW, coppie di pairs.txt, divisione gallery/probe
     eval/matrices.py      cache degli embedding (.npz) e matrice delle distanze probe x gallery
     eval/metrics.py       FAR, FRR, ROC, DET, EER, d', CMS/CMC, DIR e false alarm open-set; curva errore-rifiuto, PRR, AUROC
@@ -227,10 +253,11 @@ SecondLook/
   scripts/
     compare_faces.py      distanza tra due foto
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
+    eval_detectors.py     Viola-Jones contro SCRFD: detection rate e cache delle varianti senza allineamento
     eval_srr.py           valutazione di SRR, margine, Weibull e qualità su LFW (valore critico sul tuning; errori, PRR e AUROC sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (79 test)
+  tests/                  test con pytest (84 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 
@@ -246,6 +273,8 @@ Tutto ciò che sta in `data/` è escluso da git:
 | manifest di LFW | `data/lfw/manifest.csv` |
 | cache dei vettori | `data/lfw/embeddings_arcface_center.npz`, `data/lfw/embeddings_lbp_center.npz` |
 | cache delle misure di qualità | `data/lfw/quality_center.npz` |
+| confronto tra detector | `data/lfw/detectors_center.npz`, `data/lfw/embeddings_arcface_noalign_center.npz`, `data/lfw/embeddings_arcface_vj_center.npz`, `data/lfw/results_detectors.json` |
+| file della cascata di Viola-Jones | `data/models/haarcascade_frontalface_default.xml` (scaricato da solo) |
 | risultati della valutazione | `data/lfw/results_arcface.json`, `data/lfw/results_lbp.json`, `data/lfw/results_srr_<metodo>.json` |
 | raccolte del gruppo (volto, keystroke, JSON dei timestamp) | sotto `data/` |
 

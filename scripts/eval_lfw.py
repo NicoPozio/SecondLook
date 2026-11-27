@@ -43,6 +43,11 @@ from secondlook.eval.matrices import EmbeddingCache, cosine_distance_matrix, emb
 from secondlook.eval.metrics import cms_curve, decidability, dir_at_false_alarm, eer
 from secondlook.face.lbp import chi2_distance_matrix
 
+# varianti del confronto tra detector (face/detect.py): embedding ArcFace calcolati
+# da scripts/eval_detectors.py, distanza coseno come per arcface
+DETECTOR_VARIANTS = ("arcface_noalign", "arcface_vj")
+METHODS = ("arcface", "lbp") + DETECTOR_VARIANTS
+
 
 def pair_distances(a: np.ndarray, b: np.ndarray, method: str) -> np.ndarray:
     """Distanza coppia per coppia: riga k di a contro riga k di b (verifica 1:1).
@@ -69,7 +74,7 @@ def pair_distances(a: np.ndarray, b: np.ndarray, method: str) -> np.ndarray:
     CHIAMA      : np.linalg.norm (arcface), solo numpy (lbp)
     CHIAMATA DA : main
     """
-    if method == "arcface":
+    if method.startswith("arcface"):        # arcface e le sue varianti: distanza coseno
         a = a / np.linalg.norm(a, axis=1, keepdims=True)
         b = b / np.linalg.norm(b, axis=1, keepdims=True)
         # (a * b).sum(axis=1) = prodotto scalare riga per riga -> N numeri
@@ -87,7 +92,7 @@ def distance_matrix(probes: np.ndarray, gallery: np.ndarray, method: str) -> np.
                8 x 1677 x 2891 numeri = circa 155 MB per blocco)
     CHIAMATA DA : main (D_known e D_unknown)
     """
-    if method == "arcface":
+    if method.startswith("arcface"):        # arcface e le sue varianti: distanza coseno
         return cosine_distance_matrix(probes, gallery)
     return chi2_distance_matrix(probes, gallery, block=8)
 
@@ -179,8 +184,9 @@ def main() -> None:
     parser.add_argument("--root", default="data/lfw", help="cartella di LFW (default: data/lfw)")
     parser.add_argument("--quick", action="store_true",
                         help="prova veloce: un solo gruppo di coppie e 100 persone per l'identificazione")
-    parser.add_argument("--method", choices=["arcface", "lbp"], default="arcface",
-                        help="descrittore del volto: arcface (default) o lbp")
+    parser.add_argument("--method", choices=METHODS, default="arcface",
+                        help="descrittore del volto: arcface (default), lbp, oppure le varianti del "
+                             "confronto tra detector arcface_noalign e arcface_vj (prima eval_detectors.py)")
     args = parser.parse_args()
     method = args.method
 
@@ -217,6 +223,8 @@ def main() -> None:
     cache = EmbeddingCache(Path(root) / f"embeddings_{method}_center.npz")
     todo = cache.missing([by_id[s] for s in sorted(needed)])   # righe ancora da calcolare
     print(f"embedding: {len(needed) - len(todo)} gia' in cache, {len(todo)} da calcolare")
+    if todo and method in DETECTOR_VARIANTS:
+        raise SystemExit(f"mancano {len(todo)} embedding per {method}: esegui prima scripts/eval_detectors.py")
     if todo:
         embed_rows(todo, FaceEmbedder(), cache, select="center", method=method)
     results = {"method": method, "quick": args.quick, "face_selection": "center",

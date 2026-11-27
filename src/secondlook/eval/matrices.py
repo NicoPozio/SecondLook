@@ -179,6 +179,8 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
             "lbp"    : FaceEmbedder.crop + lbp_descriptor -> vettore LBP di 2891 numeri
             "quality": FaceEmbedder.quality_inputs + quality_measures -> 5 misure di
                        qualita' [roll, yaw, r, SI, SY] (embedder con landmarks=True)
+            "detectors": face.detect.detector_vector -> riquadri SCRFD e Viola-Jones e
+                       ArcFace sui due ritagli non allineati (1032 numeri, nan dove manca)
         Detection, scelta del volto e alignment sono IDENTICI per i due
         metodi (FaceEmbedder._detect_and_choose + norm_crop), cosi' il
         confronto ArcFace contro LBP riguarda solo il descrittore.
@@ -210,11 +212,12 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
         select     : quale volto prendere se ce n'e' piu' di uno:
                      "largest" (il piu' grande) o "center" (il piu' vicino al
                      centro, giusto per LFW: vedi FaceEmbedder.embed)
-        method     : "arcface" (default, come prima), "lbp" o "quality"
+        method     : "arcface" (default, come prima), "lbp", "quality" o "detectors"
     RESTITUISCE : nulla; il risultato e' dentro cache.vectors / cache.failed e su disco
     CHIAMA      : EmbeddingCache.missing, face.load_image, embedder.embed (arcface)
                   oppure embedder.crop + face.lbp.lbp_descriptor (lbp),
                   oppure embedder.quality_inputs + face.quality.quality_measures (quality),
+                  oppure face.detect.detector_vector (detectors),
                   EmbeddingCache.save
     CHIAMATA DA : scripts/eval_lfw.py (nessun test la chiama: richiede il modello e
                   delle foto; la parte di embedding e' verificata in test_face_selection)
@@ -229,8 +232,13 @@ def embed_rows(rows: list[dict], embedder, cache: EmbeddingCache, save_every: in
         describe = lambda img: lbp_descriptor(embedder.crop(img, select=select))
     elif method == "quality":
         describe = lambda img: quality_measures(*embedder.quality_inputs(img, select=select))
+    elif method == "detectors":
+        from secondlook.face.detect import detector_vector, haar_cascade
+
+        cascade = haar_cascade()
+        describe = lambda img: detector_vector(img, embedder, cascade, select=select)
     else:
-        raise ValueError(f"metodo sconosciuto: {method!r} (usa 'arcface', 'lbp' o 'quality')")
+        raise ValueError(f"metodo sconosciuto: {method!r} (usa 'arcface', 'lbp', 'quality' o 'detectors')")
 
     todo = cache.missing(rows)
     if not todo:

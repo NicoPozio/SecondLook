@@ -174,6 +174,7 @@ class FaceEmbedder:
         embed(img)  -> UN solo volto scelto, embedding solo di quello (piu' veloce)
         crop(img)   -> UN solo volto scelto, ritaglio allineato 112 x 112 (per LBP)
         quality_inputs(img) -> ritaglio + 5 punti + 106 punti (per gli indici di qualita')
+        embed_crop(crop) -> ArcFace su un ritaglio 112 x 112 gia' pronto (confronto tra detector)
 
     CHIAMA       : insightface.app.FaceAnalysis (costruttore)
     CREATO DA    : scripts/eval_lfw.py, scripts/compare_faces.py, i test
@@ -410,6 +411,23 @@ class FaceEmbedder:
         _, kpss, k, _ = self._detect_and_choose(img, select)
         size = self._app.models["recognition"].input_size[0]   # 112, la stessa che usa ArcFace
         return norm_crop(img, landmark=kpss[k], image_size=size)
+
+    def embed_crop(self, crop: np.ndarray) -> np.ndarray:
+        """Embedding ArcFace di un ritaglio 112 x 112 GIA' pronto (nessun rilevamento, nessun allineamento).
+
+        TEORIA
+            Serve al confronto tra detector (face/detect.py): li' il ritaglio viene
+            da un riquadro (SCRFD o Viola-Jones) senza allineamento, e ArcFace va
+            applicato cosi' com'e'. Se il ritaglio e' quello di crop(), il risultato
+            e' identico a embed() (lo controlla test_crop_is_what_arcface_sees).
+
+        INPUT       : crop = immagine BGR 112 x 112
+        RESTITUISCE : 512 float32, normalizzati (lunghezza 1)
+        CHIAMA      : models["recognition"].get_feat
+        CHIAMATA DA : face/detect.detector_vector, tests/test_detect.py
+        """
+        raw = self._app.models["recognition"].get_feat(crop).flatten()
+        return (raw / np.linalg.norm(raw)).astype(np.float32)
 
     def quality_inputs(self, img: np.ndarray, select: str = "largest"):
         """Tutto quello che serve agli indici di qualita' (face/quality.py) per il volto scelto.

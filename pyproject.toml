@@ -5,7 +5,7 @@ description = "Login multibiometrico step-up (volto e keystroke) guidato dall'SR
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
-    "opencv-python>=4.9",
+    "opencv-python>=4.9,<5",   # OpenCV 5 ha tolto Viola-Jones (CascadeClassifier)
     "insightface>=0.7.3",
     "onnxruntime>=1.17",
 ]
