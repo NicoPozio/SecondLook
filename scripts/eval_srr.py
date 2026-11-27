@@ -1,7 +1,8 @@
-"""Valutazione dell'SRR su LFW (Fase 5, passo 5.2).
+"""Valutazione dell'SRR e dei suoi concorrenti su LFW (Fase 5, passi 5.2 e 5.3).
 
 Domanda: l'SRR riesce a capire quando la risposta del primo stadio (identificazione
-open-set contro tutta la gallery) e' sbagliata?
+open-set contro tutta la gallery) e' sbagliata? E come se la cavano i criteri piu'
+semplici, che guardano solo i primi posti (margine top-1/top-2, distanza dalla soglia)?
 
 Cosa fa:
   1. ricostruisce le matrici dell'identificazione di eval_lfw.py (registrati e
@@ -9,10 +10,16 @@ Cosa fa:
   2. etichetta ogni risposta: GIUSTA se il probe e' registrato e il primo candidato
      e' la sua persona; SBAGLIATA se il primo candidato e' un altro, oppure se il
      probe e' di uno sconosciuto (qualunque nome gli si dia e' sbagliato)
-  3. calcola phi di ogni probe (relative distance e density ratio), senza usare
-     le etichette, come farebbe il login dal vivo
-  4. divide le PERSONE a meta': sulla meta' "tuning" stima phi_bar, sulla meta'
-     "test" misura gli errori con phi_bar fisso
+  3. calcola per ogni probe i quattro criteri, senza usare le etichette, come
+     farebbe il login dal vivo (per tutti: piu' alto = piu' affidabile):
+        relative    phi della relative distance  (SRR)
+        density     phi del density ratio        (SRR)
+        margin      margine top-1/top-2, d2 - d1
+        threshold   distanza dalla soglia, t - d1 (si usa -d1: stesso ordine dei probe)
+  4. divide le PERSONE a meta': sulla meta' "tuning" stima il valore critico di
+     ogni criterio, sulla meta' "test" misura gli errori con quel valore fisso
+     ATTENZIONE: un solo punto per criterio. Il confronto giusto tra criteri, a
+     tutte le soglie, si fa con PRR e curve errore-rifiuto (passo 5.4).
   5. stampa e salva i risultati in data/lfw/results_srr_<metodo>.json
 
 Uso (dalla cartella SecondLook), dopo aver gia' eseguito eval_lfw.py con lo stesso metodo:
@@ -31,7 +38,11 @@ from eval_lfw import distance_matrix      # stesso script-folder: coseno (arcfac
 from secondlook.eval.datasets import lfw_manifest, split_gallery_probes
 from secondlook.eval.matrices import EmbeddingCache
 from secondlook.eval.metrics import _per_identity, _true_rank_and_distance
+from secondlook.reliability.margin import margin_top2, top_two
 from secondlook.reliability.srr import KINDS, critical_phi, phi_matrix, srr
+
+# i criteri valutati; per relative e density si riporta anche l'SRR
+CRITERIA = ("relative", "density", "margin", "threshold")
 
 
 def split_subjects(subject_ids, seed: int = 0) -> set:
@@ -57,15 +68,19 @@ def split_subjects(subject_ids, seed: int = 0) -> set:
     return set(names[rng.permutation(len(names))][: len(names) // 2].tolist())
 
 
-def evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning) -> dict:
-    """phi_bar sul tuning, errori sul test, per una versione di phi.
+def evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning,
+                  normalize: bool = True) -> dict:
+    """Valore critico sul tuning, errori sul test, per UN criterio di affidabilita'.
+
+    Vale per qualunque criterio in cui piu' alto = piu' affidabile: phi
+    dell'SRR, margine top-1/top-2, -d1. Qui "phi" indica il valore del criterio.
 
     COME LO CALCOLA IL CODICE
         tuning: giuste = registrati del tuning con rango 1
                 sbagliate = registrati del tuning con rango > 1 + sconosciuti del tuning
-                phi_bar = critical_phi(giuste, sbagliate)
+                critical = critical_phi(giuste, sbagliate)   (phi_bar per l'SRR)
         test:   stessa divisione sulle persone del test, e con la regola
-                "affidabile se phi > phi_bar" si contano:
+                "affidabile se phi > critical" si contano:
                   errori_lasciati_passare = sbagliate con phi > phi_bar  / sbagliate
                   step_up_inutili         = giuste    con phi <= phi_bar / giuste
                   tasso_step_up           = probe con phi <= phi_bar / tutti i probe
@@ -81,26 +96,56 @@ def evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning)
         known_tuning   : True dove il probe registrato appartiene al gruppo di tuning
         phi_unknown    : phi di ogni probe sconosciuto
         unknown_tuning : True dove lo sconosciuto appartiene al gruppo di tuning
-    RESTITUISCE : dizionario con phi_bar, errori sul tuning e sul test, conteggi, mediane dell'SRR
+        normalize      : True solo per i phi dell'SRR (in [0, 1]): aggiunge le mediane
+                         dell'SRR; per margine e -d1 la normalizzazione non ha senso
+    RESTITUISCE : dizionario con il valore critico, errori sul test, conteggi
+                  (e mediane dell'SRR se normalize)
     CHIAMA      : critical_phi, srr
     CHIAMATA DA : main
     """
-    phi_bar, _, _ = critical_phi(
+    critical, _, _ = critical_phi(
         phi_known[known_tuning & correct],
         np.concatenate([phi_known[known_tuning & ~correct], phi_unknown[unknown_tuning]]),
     )
     test_correct = phi_known[~known_tuning & correct]
     test_wrong = np.concatenate([phi_known[~known_tuning & ~correct], phi_unknown[~unknown_tuning]])
     test_all = np.concatenate([test_correct, test_wrong])
-    return {
-        "phi_bar": phi_bar,
+    out = {
+        "critical": critical,
         "test_correct": int(test_correct.size),
         "test_wrong": int(test_wrong.size),
-        "errors_let_through": float((test_wrong > phi_bar).mean()),        # sbagliate prese per affidabili
-        "useless_step_up": float((test_correct <= phi_bar).mean()),       # giuste prese per inaffidabili
-        "step_up_rate": float((test_all <= phi_bar).mean()),
-        "srr_median_correct": float(np.median(srr(test_correct, phi_bar))),
-        "srr_median_wrong": float(np.median(srr(test_wrong, phi_bar))),
+        "errors_let_through": float((test_wrong > critical).mean()),       # sbagliate prese per affidabili
+        "useless_step_up": float((test_correct <= critical).mean()),      # giuste prese per inaffidabili
+        "step_up_rate": float((test_all <= critical).mean()),
+    }
+    if normalize:
+        out["srr_median_correct"] = float(np.median(srr(test_correct, critical)))
+        out["srr_median_wrong"] = float(np.median(srr(test_wrong, critical)))
+    return out
+
+
+def criteria_scores(dist, gallery_ids) -> dict:
+    """I quattro criteri di affidabilita' per ogni riga di una matrice probe x template.
+
+    COME LO CALCOLA IL CODICE
+        relative, density : phi_matrix (srr.py)
+        margin            : top_two + margin_top2 (margin.py)
+        threshold         : -d1. La distanza dalla soglia t - d1 ordina i probe
+                            esattamente come -d1 per qualunque t, quindi il suo
+                            valore critico c sul tuning equivale alla soglia t = -c
+    ESEMPIO (una riga, caso B della guida: 0.30, 0.32, 0.35, 0.90, 0.95)
+        relative 0.02   density 0.50   margin 0.02   threshold -0.30
+    INPUT       : dist = matrice (n_probe x n_template); gallery_ids = persona di ogni colonna
+    RESTITUISCE : dizionario criterio -> array di n_probe valori (piu' alto = piu' affidabile)
+    CHIAMA      : phi_matrix, top_two, margin_top2
+    CHIAMATA DA : main
+    """
+    d1, d2 = top_two(dist, gallery_ids)
+    return {
+        "relative": phi_matrix(dist, gallery_ids, "relative"),
+        "density": phi_matrix(dist, gallery_ids, "density"),
+        "margin": margin_top2(d1, d2),
+        "threshold": -d1,
     }
 
 
@@ -112,7 +157,7 @@ def main() -> None:
         2. matrici:   distance_matrix (da eval_lfw.py) per registrati e sconosciuti
         3. etichette: _per_identity, _true_rank_and_distance -> giusta se rango 1
         4. divisione: split_subjects (meta' tuning, meta' test, per persona)
-        5. per ogni versione di phi: phi_matrix, evaluate_kind
+        5. per ogni criterio: criteria_scores, evaluate_kind
         6. stampa e salva results_srr_<metodo>.json
 
     CHIAMATA DA : riga di comando
@@ -153,23 +198,30 @@ def main() -> None:
     known_tuning = np.array([s in tuning for s in k_ids])
     unknown_tuning = np.array([s in tuning for s in u_ids])
 
-    # --- 5. una valutazione per ogni versione di phi -------------------------
+    # --- 5. una valutazione per ogni criterio --------------------------------
     results = {"method": method, "known_probes": len(known), "unknown_probes": len(unknown),
                "rank1_correct": float(correct.mean()), "tuning_subjects": len(tuning)}
-    for kind in KINDS:
-        results[kind] = evaluate_kind(phi_matrix(D_known, g_ids, kind), correct, known_tuning,
-                                      phi_matrix(D_unknown, g_ids, kind), unknown_tuning)
+    s_known, s_unknown = criteria_scores(D_known, g_ids), criteria_scores(D_unknown, g_ids)
+    for c in CRITERIA:
+        results[c] = evaluate_kind(s_known[c], correct, known_tuning, s_unknown[c], unknown_tuning,
+                                   normalize=c in KINDS)
+    # per la distanza dalla soglia si riporta la soglia vera t = -valore critico
+    results["threshold"]["acceptance_threshold"] = -results["threshold"]["critical"]
 
     # --- 6. stampa e salvataggio ---------------------------------------------
     print(f"risposte giuste (rango 1) tra i registrati: {results['rank1_correct'] * 100:.2f} %")
-    for kind in KINDS:
-        r = results[kind]
-        print(f"\n=== {kind} === phi_bar = {r['phi_bar']:.4f} (stimato sul tuning)")
+    names = {"relative": "SRR relative distance (phi_bar)", "density": "SRR density ratio (phi_bar)",
+             "margin": "margine top-1/top-2", "threshold": "distanza dalla soglia (soglia t)"}
+    for c in CRITERIA:
+        r = results[c]
+        crit = r.get("acceptance_threshold", r["critical"])
+        print(f"\n=== {names[c]} === valore critico {crit:.4f} (stimato sul tuning)")
         print(f"test: {r['test_correct']} risposte giuste, {r['test_wrong']} sbagliate")
-        print(f"errori lasciati passare  {r['errors_let_through'] * 100:6.2f} %   (sbagliate con phi > phi_bar)")
-        print(f"step-up inutili          {r['useless_step_up'] * 100:6.2f} %   (giuste con phi <= phi_bar)")
+        print(f"errori lasciati passare  {r['errors_let_through'] * 100:6.2f} %   (sbagliate giudicate affidabili)")
+        print(f"step-up inutili          {r['useless_step_up'] * 100:6.2f} %   (giuste giudicate inaffidabili)")
         print(f"tasso di step-up         {r['step_up_rate'] * 100:6.2f} %   (su tutti i login del test)")
-        print(f"SRR mediano: giuste {r['srr_median_correct']:+.2f}   sbagliate {r['srr_median_wrong']:+.2f}")
+        if "srr_median_correct" in r:
+            print(f"SRR mediano: giuste {r['srr_median_correct']:+.2f}   sbagliate {r['srr_median_wrong']:+.2f}")
     out = root / f"results_srr_{method}.json"
     out.write_text(json.dumps(results, indent=2))
     print(f"\nrisultati salvati in {out}")

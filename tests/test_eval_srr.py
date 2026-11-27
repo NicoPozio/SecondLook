@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from eval_srr import evaluate_kind, split_subjects  # noqa: E402
+from eval_srr import criteria_scores, evaluate_kind, split_subjects  # noqa: E402
 
 
 def test_split_is_half_by_person_and_repeatable():
@@ -27,7 +27,23 @@ def test_evaluate_kind_by_hand():
     phi_unknown = np.array([0.4, 0.7])
     unknown_tuning = np.array([True, False])
     r = evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning)
-    assert r["phi_bar"] == 0.4
+    assert r["critical"] == 0.4
     assert r["errors_let_through"] == pytest.approx(1 / 2)   # 0.7 > 0.4
     assert r["useless_step_up"] == pytest.approx(1 / 3)      # 0.3 <= 0.4
     assert r["step_up_rate"] == pytest.approx(2 / 5)         # 0.3 e 0.1
+
+
+def test_criteria_scores_case_b():
+    # caso B della guida: 0.30, 0.32, 0.35, 0.90, 0.95
+    sc = criteria_scores([[0.30, 0.32, 0.35, 0.90, 0.95]], ["A", "B", "C", "D", "E"])
+    assert sc["relative"][0] == pytest.approx(0.02 / 0.95)
+    assert sc["density"][0] == 0.5
+    assert sc["margin"][0] == pytest.approx(0.02)
+    assert sc["threshold"][0] == pytest.approx(-0.30)
+
+
+def test_margin_has_no_srr_medians():
+    r = evaluate_kind(np.array([0.5, 0.1, 0.6]), np.array([True, False, True]),
+                      np.array([True, True, False]), np.array([0.05, 0.2]), np.array([True, False]),
+                      normalize=False)
+    assert "srr_median_correct" not in r
