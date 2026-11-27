@@ -1,0 +1,33 @@
+"""Test di scripts/eval_srr.py: divisione delle persone e conteggio degli errori dell'SRR."""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from eval_srr import evaluate_kind, split_subjects  # noqa: E402
+
+
+def test_split_is_half_by_person_and_repeatable():
+    ids = ["Anna", "Bruno", "Carla", "Dario", "Anna", "Elena", "Fabio"]   # Anna ripetuta
+    tuning = split_subjects(ids)
+    assert len(tuning) == 3                         # 6 persone diverse -> meta' = 3
+    assert tuning <= set(ids)
+    assert split_subjects(ids) == tuning            # stesso seme -> stessa divisione
+
+
+def test_evaluate_kind_by_hand():
+    # tuning: giuste [0.9, 0.6], sbagliate [0.2, 0.4] -> phi_bar = 0.4 (nessun errore)
+    # test:   giuste [0.9, 0.8, 0.3], sbagliate [0.1 (registrato), 0.7 (sconosciuto)]
+    phi_known = np.array([0.9, 0.6, 0.2, 0.9, 0.8, 0.3, 0.1])
+    correct = np.array([True, True, False, True, True, True, False])
+    known_tuning = np.array([True, True, True, False, False, False, False])
+    phi_unknown = np.array([0.4, 0.7])
+    unknown_tuning = np.array([True, False])
+    r = evaluate_kind(phi_known, correct, known_tuning, phi_unknown, unknown_tuning)
+    assert r["phi_bar"] == 0.4
+    assert r["errors_let_through"] == pytest.approx(1 / 2)   # 0.7 > 0.4
+    assert r["useless_step_up"] == pytest.approx(1 / 3)      # 0.3 <= 0.4
+    assert r["step_up_rate"] == pytest.approx(2 / 5)         # 0.3 e 0.1

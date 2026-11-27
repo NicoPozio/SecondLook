@@ -11,7 +11,8 @@ Progetto d'esame di Biometric Systems, Sapienza Università di Roma.
 | 0 | test di precisione dei timestamp del browser | fatto |
 | 1 | embedding del volto con insightface (`face/embed.py`) | fatto |
 | 2 | metriche, caricamento di LFW, matrici delle distanze, valutazione di ArcFace e LBP su LFW | fatto: ArcFace 99,83 %, LBP 66,00 % di accuratezza su LFW |
-| 3 e successive | SRR, keystroke, fusione step-up, app di acquisizione | da fare |
+| 5 | stimatori di affidabilità: SRR (`reliability/srr.py`) valutato su LFW | in corso: SRR fatto; margine, Weibull, qualità, PRR da fare |
+| 3, 4, 6-8 | app di acquisizione, raccolta, keystroke, fusione step-up, demo | in corso (altri binari) / da fare |
 
 ## Requisiti
 
@@ -40,13 +41,15 @@ Al primo utilizzo insightface scarica automaticamente il pacchetto di modelli `b
 uv run pytest -v
 ```
 
-Devono passare tutti i 43 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
+Devono passare tutti i 55 test. I test sul modello scaricano `buffalo_l` se non è già presente, quindi la prima esecuzione richiede qualche minuto.
 
 | File di test | Cosa controlla |
 |---|---|
 | `tests/test_embed.py` | distanza coseno, rilevamento dei volti, stesso volto più vicino degli altri, errore se non c'è nessun volto |
 | `tests/test_face_selection.py` | scelta del volto quando in una foto ce n'è più di uno (`largest` e `center`); il ritaglio per LBP è identico a quello che riceve ArcFace |
 | `tests/test_lbp.py` | codici LBP calcolati a mano, pattern uniformi, istogrammi a griglia, distanza chi-quadro |
+| `tests/test_srr.py` | relative distance, density ratio, valore critico e SRR sugli esempi a mano degli appunti e della guida |
+| `tests/test_eval_srr.py` | divisione delle persone tuning/test e conteggio degli errori dell'SRR |
 | `tests/test_ten_fold.py` | accuratezza a 10 gruppi di `eval_lfw.py`: conto a mano, soglia mai scelta sul gruppo d'esame |
 | `tests/test_metrics.py` | FAR, FRR, ROC, EER, d′, CMS, DIR, calcolati su esempi piccoli verificabili a mano |
 | `tests/test_lfw_tools.py` | manifest, lettura di `pairs.txt`, divisione gallery/probe, matrice delle distanze, cache degli embedding, su un mini LFW finto |
@@ -123,6 +126,32 @@ Le due colonne usano le stesse foto, gli stessi volti rilevati (18 foto su 13.23
 
 L'accuratezza di ArcFace coincide con quella dichiarata da insightface per lo stesso modello (`buffalo_l`, 99,83 %). LBP è nettamente peggiore: su LFW le foto hanno pose, luci ed espressioni molto diverse, e le feature scelte a mano ne soffrono molto più di quelle apprese da una rete. EER, CMS e DIR non hanno un valore ufficiale di confronto su LFW: la divisione gallery/probe è nostra.
 
+## Affidabilità della risposta: SRR su LFW
+
+`src/secondlook/reliability/srr.py` calcola l'SRR (System Response Reliability) di una risposta dell'identificazione, a partire dalle distanze del probe da **ogni persona** della gallery (se una persona ha più template si tiene il più vicino):
+
+- relative distance φ = (d₂ − d₁) / d_N, density ratio φ = 1 − |N_b| / |N| (nuvola < 2·d₁, primo escluso);
+- valore critico φ̄, stimato dove si bilanciano risposte sbagliate giudicate affidabili e risposte giuste giudicate inaffidabili;
+- SRR = (φ − φ̄) / S, in [−1, 1]; nel login, SRR basso fa scattare lo step-up.
+
+```bash
+uv run python scripts/eval_srr.py                 # ArcFace (serve la cache di eval_lfw.py)
+uv run python scripts/eval_srr.py --method lbp    # LBP
+```
+
+Lo script usa le matrici dell'identificazione open-set di `eval_lfw.py`. Una risposta è giusta se il probe è registrato e il primo candidato è la sua persona; è sbagliata se il primo candidato è un altro o se il probe è di uno sconosciuto. Le persone vengono divise a metà (seme fisso): φ̄ si stima sulla metà di tuning, gli errori si misurano sull'altra metà. Risultati in `data/lfw/results_srr_<metodo>.json`.
+
+Risultati sulla metà di test (27 novembre 2026), regola "affidabile se φ > φ̄, altrimenti step-up":
+
+| | ArcFace relative | ArcFace density | LBP relative | LBP density |
+|---|---|---|---|---|
+| φ̄ (dal tuning) | 0,139 | 0,000 | 0,014 | 0,002 |
+| risposte sbagliate lasciate passare | 0,25 % | 0,25 % | 30,5 % | 38,5 % |
+| step-up su risposte giuste | 0,69 % | 0,71 % | 31,1 % | 35,8 % |
+| tasso di step-up (circa 1/3 dei login di test sono sconosciuti) | 32,9 % | 32,9 % | 67,6 % | 60,2 % |
+
+Con ArcFace e distanze coseno, per gli sconosciuti la nuvola < 2·d₁ contiene quasi sempre tutta la gallery: il density ratio diventa quasi un sì/no e φ̄ vale 0.
+
 ## Test di precisione dei timestamp
 
 Il keystroke misura per quanto resta premuto ogni tasto e quanto passa tra un tasto e il successivo, cioè differenze di pochi millisecondi. I browser però arrotondano di proposito i tempi degli eventi, per motivi di sicurezza, e di quanto lo fanno dipende dal browser e dalle sue impostazioni. Prima di costruire l'app di acquisizione va quindi verificato che il browser scelto sia abbastanza preciso.
@@ -158,16 +187,18 @@ SecondLook/
     eval/datasets.py      manifest nel formato comune, download di LFW, coppie di pairs.txt, divisione gallery/probe
     eval/matrices.py      cache degli embedding (.npz) e matrice delle distanze probe x gallery
     eval/metrics.py       FAR, FRR, ROC, DET, EER, d', CMS/CMC, DIR e false alarm open-set
-    reliability/          stimatori di affidabilità: SRR, margine, Weibull (da fare)
+    reliability/srr.py    SRR: relative distance, density ratio, valore critico, normalizzazione
+    reliability/          altri stimatori: margine, Weibull (da fare)
     keystroke/            feature di digitazione e matcher (da fare)
     fusion/               normalizzazione, step-up, aggiornamento template (da fare)
     app/                  app web di acquisizione e demo (da fare)
   scripts/
     compare_faces.py      distanza tra due foto
     eval_lfw.py           valutazione completa su LFW, con ArcFace o LBP (--method)
+    eval_srr.py           valutazione dell'SRR su LFW (phi_bar sul tuning, errori sul test)
   tools/
     timestamp_test.html   test di precisione dei timestamp del browser
-  tests/                  test con pytest (43 test)
+  tests/                  test con pytest (55 test)
   data/                   dati locali, esclusi da git (LFW, cache, risultati, raccolte)
 ```
 
@@ -182,7 +213,7 @@ Tutto ciò che sta in `data/` è escluso da git:
 | foto di LFW e `pairs.txt` | `data/lfw/lfw/`, `data/lfw/pairs.txt` |
 | manifest di LFW | `data/lfw/manifest.csv` |
 | cache dei vettori | `data/lfw/embeddings_arcface_center.npz`, `data/lfw/embeddings_lbp_center.npz` |
-| risultati della valutazione | `data/lfw/results_arcface.json`, `data/lfw/results_lbp.json` |
+| risultati della valutazione | `data/lfw/results_arcface.json`, `data/lfw/results_lbp.json`, `data/lfw/results_srr_<metodo>.json` |
 | raccolte del gruppo (volto, keystroke, JSON dei timestamp) | sotto `data/` |
 
 I dati biometrici, le foto e i JSON con il ritmo di digitazione delle persone **non devono finire nel repository**.
